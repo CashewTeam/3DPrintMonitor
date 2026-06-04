@@ -1,0 +1,169 @@
+package com.con11.a3dprinthelper.web
+
+object WebConsolePage {
+    val html: String = """
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>3DPrintHelper Web Monitor</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg:#101418; --panel:#1b2229; --panel2:#222b33; --line:#33404a;
+      --text:#e6edf3; --muted:#91a2af; --accent:#7dd3fc; --good:#1b7f54;
+      --warn:#e98024; --bad:#d32f2f;
+    }
+    * { box-sizing: border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font-family: ui-sans-serif, "Noto Sans SC", sans-serif; }
+    .app { min-height:100vh; padding:18px; display:grid; grid-template-columns:minmax(0,3fr) minmax(280px,1fr); gap:16px; }
+    .videoPanel, .side, .settings { background:var(--panel); border:1px solid var(--line); border-radius:8px; }
+    .videoPanel { position:relative; overflow:hidden; min-height:360px; display:flex; align-items:center; justify-content:center; }
+    .videoPanel img { width:100%; aspect-ratio:4/3; object-fit:contain; background:#000; display:block; }
+    .overlay { position:absolute; left:14px; bottom:14px; max-width:520px; padding:14px; border-radius:8px; background:rgba(16,20,24,.82); backdrop-filter:blur(10px); }
+    .overlay.bad { background:rgba(139,31,24,.88); } .overlay.warn { background:rgba(132,68,15,.88); } .overlay.good { background:rgba(15,88,57,.88); }
+    h1 { margin:0 0 8px; font-size:22px; letter-spacing:0; }
+    h2 { margin:0 0 12px; font-size:16px; }
+    p { margin:4px 0; color:var(--muted); }
+    .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+    .metric { font-size:13px; color:#d6e1ea; }
+    .side { padding:14px; display:flex; flex-direction:column; gap:10px; }
+    button { border:0; border-radius:8px; padding:11px 12px; background:var(--accent); color:#082f49; font-weight:700; cursor:pointer; }
+    button.secondary { background:transparent; color:var(--text); border:1px solid #60717e; }
+    button.danger { background:var(--bad); color:white; }
+    .settings { grid-column:1/-1; padding:16px; display:grid; grid-template-columns:repeat(3,minmax(220px,1fr)); gap:14px; }
+    label { display:block; font-size:12px; color:var(--muted); margin-bottom:6px; }
+    input, textarea, select { width:100%; border:1px solid #60717e; border-radius:8px; background:#101820; color:var(--text); padding:10px; }
+    textarea { min-height:150px; resize:vertical; }
+    .field { margin-bottom:10px; }
+    .notice { color:#ffcf9f; font-size:13px; }
+    @media (max-width: 860px) { .app { grid-template-columns:1fr; padding:10px; } .settings { grid-template-columns:1fr; } .overlay { position:static; width:100%; max-width:none; border-radius:0; } .videoPanel { display:block; } }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <section class="videoPanel">
+      <img id="stream" src="/stream.mjpg" alt="camera stream">
+      <div id="overlay" class="overlay">
+        <h1>3D 打印巡检</h1>
+        <div class="row">
+          <span class="metric" id="runState">--</span>
+          <span class="metric" id="countdown">下次：--:--</span>
+          <span class="metric" id="torch">补光 --</span>
+          <span class="metric" id="cameraSource">相机 --</span>
+        </div>
+        <p id="summary">连接中...</p>
+        <div class="row">
+          <span class="metric" id="lastTime">最近 --</span>
+          <span class="metric" id="model">模型 --</span>
+          <span class="metric" id="confidence">置信度 --</span>
+          <span class="metric" id="previewMeta">预览 --</span>
+        </div>
+        <p id="error"></p>
+      </div>
+    </section>
+    <aside class="side">
+      <button id="startBtn">开始巡视</button>
+      <button class="secondary" data-action="analyze_now">立即分析</button>
+      <button class="secondary" id="torchBtn">开启闪光灯</button>
+      <button class="secondary" id="screenBtn">息屏</button>
+      <button class="secondary" data-action="test_bark">测试 Bark</button>
+      <p class="notice">无密码局域网访问，请只在可信 Wi-Fi 使用。</p>
+      <p id="webUrl"></p>
+    </aside>
+    <section id="settings" class="settings"></section>
+    <section class="settings">
+      <div>
+        <h2>设置操作</h2>
+        <button id="saveBtn">保存设置</button>
+        <p id="saveState"></p>
+      </div>
+    </section>
+  </main>
+  <script>
+    let schema = null;
+    let running = false;
+    const post = (url, data) => fetch(url, {method:"POST", headers:{"Content-Type":"application/json; charset=utf-8"}, body:JSON.stringify(data)});
+    function fmtTime(ms){ return ms ? new Date(ms).toLocaleTimeString() : "--"; }
+    function countdown(ms){ if(!ms) return "下次：--:--"; const d=Math.max(0,ms-Date.now()); return "下次：" + String(Math.floor(d/60000)).padStart(2,"0") + ":" + String(Math.floor((d%60000)/1000)).padStart(2,"0"); }
+    function fieldElement(field) {
+      let el;
+      if(field.type==="enum"){
+        el=document.createElement("select");
+        (field.options||[]).forEach(o=>{const option=document.createElement("option"); option.value=o.value; option.textContent=o.label; el.appendChild(option);});
+      } else if(field.type==="textarea"){
+        el=document.createElement("textarea"); el.rows=field.rows||4;
+      } else {
+        el=document.createElement("input");
+        el.type=field.type==="secret" ? "password" : field.type==="boolean" ? "checkbox" : field.type==="slider" ? "range" : field.type==="number" ? "number" : "text";
+        if(field.min!==undefined) el.min=field.min;
+        if(field.max!==undefined) el.max=field.max;
+        if(field.type==="secret") el.autocomplete="off";
+      }
+      el.id=field.key; el.dataset.settingType=field.type; return el;
+    }
+    function renderSchema(){
+      const root=document.getElementById("settings"); root.replaceChildren();
+      schema.sections.forEach(section=>{
+        const group=document.createElement("div"); const title=document.createElement("h2"); title.textContent=section.title; group.appendChild(title);
+        section.fields.forEach(field=>{
+          const wrap=document.createElement("div"); wrap.className="field";
+          const label=document.createElement("label"); label.htmlFor=field.key; label.textContent=field.label+(field.unit ? "（"+field.unit+"）" : "")+(field.webWriteOnly ? "（留空表示不修改）" : "");
+          wrap.appendChild(label); wrap.appendChild(fieldElement(field)); group.appendChild(wrap);
+        });
+        root.appendChild(group);
+      });
+    }
+    async function loadSettings(){
+      if(!schema){ schema=await (await fetch("/api/settings/schema",{cache:"no-store"})).json(); renderSchema(); }
+      const s=await (await fetch("/api/settings",{cache:"no-store"})).json();
+      schema.sections.flatMap(x=>x.fields).forEach(field=>{ const el=document.getElementById(field.key); if(!el || s[field.key]===undefined || field.webWriteOnly) return; if(el.type==="checkbox") el.checked=!!s[field.key]; else el.value=s[field.key]; });
+    }
+    async function refresh(){
+      try {
+        const s = await (await fetch("/api/status", {cache:"no-store"})).json();
+        running = s.isRunning;
+        const r = s.lastResult;
+        document.getElementById("startBtn").textContent = running ? "暂停巡视" : "开始巡视";
+        document.getElementById("torchBtn").textContent = s.torchEnabled ? "关闭闪光灯" : "开启闪光灯";
+        document.getElementById("screenBtn").textContent = s.screenOff ? "点亮屏幕" : "息屏";
+        document.getElementById("runState").textContent = running ? "运行中" : "已暂停";
+        document.getElementById("countdown").textContent = countdown(s.nextCaptureAtMillis);
+        document.getElementById("torch").textContent = "补光 " + (s.torchEnabled ? "开" : "关");
+        document.getElementById("cameraSource").textContent = "相机 " + (s.cameraSource || "--");
+        document.getElementById("summary").textContent = r ? r.summary : s.statusMessage;
+        document.getElementById("lastTime").textContent = "最近 " + fmtTime(s.lastAnalysisAtMillis);
+        document.getElementById("model").textContent = "模型 " + s.settings.openAiModel;
+        document.getElementById("confidence").textContent = r ? ("置信度 " + Number(r.confidence).toFixed(2)) : "置信度 --";
+        document.getElementById("previewMeta").textContent = "预览 " + s.webPreviewScalePercent + "% · " + s.webPreviewFps + " FPS";
+        document.getElementById("error").textContent = s.cameraError || s.errorMessage || "";
+        document.getElementById("webUrl").textContent = s.webUrl;
+        const overlay=document.getElementById("overlay"); overlay.className="overlay";
+        if(s.printStatus==="Abnormal") overlay.classList.add("bad"); else if(s.printStatus==="Warning") overlay.classList.add("warn"); else if(s.printStatus==="Normal") overlay.classList.add("good");
+      } catch(e) { document.getElementById("summary").textContent = "连接已断开"; }
+    }
+    document.getElementById("startBtn").onclick = () => post("/api/control", {action: running ? "stop" : "start"}).then(refresh);
+    document.getElementById("torchBtn").onclick = () => post("/api/control", {action:"toggle_torch"}).then(refresh);
+    document.getElementById("screenBtn").onclick = async () => {
+      const button=document.getElementById("screenBtn");
+      button.disabled=true;
+      try { await post("/api/control", {action: button.textContent.includes("点亮") ? "screen_on" : "screen_off"}); }
+      finally { setTimeout(()=>{ button.disabled=false; refresh(); }, 200); }
+    };
+    document.querySelectorAll("[data-action]").forEach(b => b.onclick = () => post("/api/control", {action:b.dataset.action}).then(refresh));
+    document.getElementById("saveBtn").onclick = async () => {
+      const button=document.getElementById("saveBtn"), state=document.getElementById("saveState"), data={}; button.disabled=true; state.textContent="正在保存...";
+      schema.sections.flatMap(x=>x.fields).forEach(field=>{ const el=document.getElementById(field.key); if(!el || (field.webWriteOnly && !el.value.trim())) return; data[field.key]=(field.type==="number"||field.type==="slider") ? Number(el.value) : field.type==="boolean" ? el.checked : el.value; });
+      try {
+        const response=await post("/api/settings",data); if(!response.ok) throw new Error(await response.text());
+        const result=await response.json(); state.textContent="保存成功，正在刷新...";
+        setTimeout(()=>{ window.location.href=result.reloadUrl || window.location.href; }, result.reloadAfterMs || 1500);
+      } catch(e) { button.disabled=false; state.textContent="保存失败："+e.message; }
+    };
+    loadSettings(); refresh(); setInterval(refresh, 1000);
+  </script>
+</body>
+</html>
+    """.trimIndent()
+}

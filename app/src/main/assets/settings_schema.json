@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "sections": [
+    {
+      "id": "capture",
+      "title": "拍照与巡视",
+      "fields": [
+        {"key":"captureIntervalMinutes","label":"拍照间隔","type":"slider","default":5,"min":1,"max":1440,"unit":"分钟"},
+        {"key":"jpegQuality","label":"JPEG 质量","type":"slider","default":82,"min":40,"max":100},
+        {"key":"requestTimeoutSeconds","label":"请求超时","type":"slider","default":60,"min":10,"max":300,"unit":"秒"},
+        {"key":"notificationCooldownMinutes","label":"异常推送冷却","type":"slider","default":30,"min":1,"max":1440,"unit":"分钟"}
+      ]
+    },
+    {
+      "id": "flash",
+      "title": "闪光灯",
+      "fields": [
+        {"key":"autoFlashEnabled","label":"自动闪光灯","type":"boolean","default":true}
+      ]
+    },
+    {
+      "id": "llm",
+      "title": "LLM 配置",
+      "fields": [
+        {"key":"openAiApiKey","label":"OpenAI API Key","type":"secret","default":"","webWriteOnly":true},
+        {"key":"openAiModel","label":"模型","type":"text","default":"gpt-4.1-mini"},
+        {"key":"openAiBaseUrl","label":"Base URL","type":"text","default":"https://api.openai.com/v1"},
+        {
+          "key":"imageDetail","label":"图像 detail","type":"enum","default":"Auto",
+          "options":[
+            {"value":"Low","label":"low"},
+            {"value":"Auto","label":"auto"},
+            {"value":"High","label":"high"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "prompt",
+      "title": "提示词",
+      "fields": [
+        {"key":"prompt","label":"巡检提示词","type":"textarea","default":"","rows":8,"resetAction":"defaultPrompt"}
+      ]
+    },
+    {
+      "id": "bark_web",
+      "title": "Bark 与 Web",
+      "fields": [
+        {"key":"barkUrl","label":"Bark URL","type":"secret","default":"https://api.day.app/"},
+        {"key":"barkTitleTemplate","label":"推送标题","type":"text","default":"3D 打印异常"},
+        {"key":"webPort","label":"Web 端口号","type":"number","default":8080,"min":1024,"max":65535},
+        {"key":"keepAliveServiceEnabled","label":"后台保活服务","type":"boolean","default":true},
+        {"key":"autoScreenOffEnabled","label":"自动息屏","type":"boolean","default":true},
+        {"key":"webAliveInBackground","label":"锁屏/后台保持 Web 可访问","type":"boolean","default":true},
+        {"key":"webPreviewScalePercent","label":"Web 预览分辨率","type":"slider","default":70,"min":20,"max":100,"unit":"%"},
+        {"key":"webPreviewFps","label":"Web 预览帧率","type":"slider","default":3,"min":1,"max":10,"unit":"FPS"}
+      ]
+    }
+  ]
+}
