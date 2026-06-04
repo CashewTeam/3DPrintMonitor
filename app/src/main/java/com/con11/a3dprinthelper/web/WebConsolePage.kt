@@ -23,9 +23,11 @@ object WebConsolePage {
     .videoPanel img { width:100%; aspect-ratio:4/3; object-fit:contain; background:#000; display:block; }
     .overlay { position:absolute; left:14px; bottom:14px; max-width:520px; padding:14px; border-radius:8px; background:rgba(16,20,24,.82); backdrop-filter:blur(10px); }
     .overlay.bad { background:rgba(139,31,24,.88); } .overlay.warn { background:rgba(132,68,15,.88); } .overlay.good { background:rgba(15,88,57,.88); }
-    h1 { margin:0 0 8px; font-size:22px; letter-spacing:0; }
+    h1 { margin:0; font-size:22px; letter-spacing:0; }
     h2 { margin:0 0 12px; font-size:16px; }
     p { margin:4px 0; color:var(--muted); }
+    .titleRow { margin-bottom:8px; display:flex; align-items:center; justify-content:space-between; gap:12px; }
+    .version { color:var(--muted); font-size:12px; white-space:nowrap; }
     .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
     .metric { font-size:13px; color:#d6e1ea; }
     .metric.lowBattery { color:#ffb4ab; }
@@ -71,7 +73,10 @@ object WebConsolePage {
     <section class="videoPanel">
       <img id="stream" alt="camera stream">
       <div id="overlay" class="overlay">
-        <h1>3D 打印巡检</h1>
+        <div class="titleRow">
+          <h1>3D 打印巡检</h1>
+          <span id="appVersion" class="version">v--</span>
+        </div>
         <div class="row">
           <span class="metric" id="runState">--</span>
           <span class="metric" id="countdown">下次：--:--</span>
@@ -246,6 +251,7 @@ object WebConsolePage {
         const s = await (await fetch("/api/status", {cache:"no-store"})).json();
         running = s.isRunning;
         const r = s.lastResult;
+        document.getElementById("appVersion").textContent = "v" + (s.appVersion || "--");
         document.getElementById("startBtn").textContent = running ? "暂停巡视" : "开始巡视";
         document.getElementById("monitorHours").disabled=running;
         document.getElementById("monitorMinutes").disabled=running;

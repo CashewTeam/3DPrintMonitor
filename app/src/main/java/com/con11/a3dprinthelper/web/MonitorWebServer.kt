@@ -2,6 +2,7 @@ package com.con11.a3dprinthelper.web
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import com.con11.a3dprinthelper.BuildConfig
 import com.con11.a3dprinthelper.network.PrintStatus
 import fi.iki.elonen.NanoHTTPD
 import java.io.ByteArrayOutputStream
@@ -74,6 +75,7 @@ class MonitorWebServer(
         val wifi = bridge.wifiStatus()
         val result = ui.lastResult
         return JSONObject()
+            .put("appVersion", BuildConfig.VERSION_NAME)
             .put("isRunning", ui.isRunning)
             .put("isAnalyzing", ui.isAnalyzing)
             .put("analysisStage", ui.analysisStage.name)

@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.os.PowerManager
 import android.view.WindowManager
+import com.con11.a3dprinthelper.BuildConfig
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -372,7 +373,18 @@ private fun CameraStatusOverlay(
             .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        Text("3D 打印巡检", color = Color.White, style = MaterialTheme.typography.titleLarge)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("3D 打印巡检", color = Color.White, style = MaterialTheme.typography.titleLarge)
+            Text(
+                text = "v${BuildConfig.VERSION_NAME}",
+                color = Color(0xFFB8C3CC),
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(
                 text = if (uiState.isRunning) "运行中" else "已暂停",
