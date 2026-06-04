@@ -28,7 +28,20 @@ object WebConsolePage {
     p { margin:4px 0; color:var(--muted); }
     .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
     .metric { font-size:13px; color:#d6e1ea; }
+    .metric.lowBattery { color:#ffb4ab; }
+    .metric.charging { color:#86efac; }
+    .metric.weakSignal { color:#ffcf9f; }
+    .metric.strongSignal { color:#86efac; }
+    .analysisDetails { display:none; margin-top:8px; padding-top:8px; border-top:1px solid rgba(255,255,255,.18); }
+    .analysisDetails.active { display:block; }
+    .monitoringProgress { display:none; margin-top:8px; padding-top:8px; border-top:1px solid rgba(255,255,255,.18); }
+    .monitoringProgress.active { display:block; }
+    .progressTrack { height:6px; margin-top:5px; overflow:hidden; border-radius:3px; background:rgba(255,255,255,.18); }
+    .progressBar { width:0; height:100%; border-radius:3px; background:#ffb74d; transition:width .8s linear; }
     .side { padding:14px; display:flex; flex-direction:column; gap:10px; }
+    .durationInputs { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+    .durationInputs label { margin:0; }
+    .durationHint { margin-top:-4px; font-size:11px; }
     button { border:0; border-radius:8px; padding:11px 12px; background:var(--accent); color:#082f49; font-weight:700; cursor:pointer; }
     button.secondary { background:transparent; color:var(--text); border:1px solid #60717e; }
     button.fieldAction { margin-top:8px; padding:8px 10px; font-size:12px; }
@@ -65,8 +78,18 @@ object WebConsolePage {
           <span class="metric" id="torch">补光 --</span>
           <span class="metric" id="cameraSource">相机 --</span>
           <span class="metric" id="keepAliveState">保活 --</span>
+          <span class="metric" id="batteryState">电量 --</span>
+          <span class="metric" id="wifiState">WiFi --</span>
+          <span class="metric" id="stopTime">关闭 不限时</span>
         </div>
         <p id="summary">连接中...</p>
+        <div id="analysisDetails" class="analysisDetails">
+          <div class="row">
+            <span class="metric" id="analysisStage">阶段 --</span>
+            <span class="metric" id="analysisElapsed">耗时 --</span>
+            <span class="metric" id="analysisChars">已接收 --</span>
+          </div>
+        </div>
         <div class="row">
           <span class="metric" id="lastTime">最近 --</span>
           <span class="metric" id="model">模型 --</span>
@@ -74,10 +97,22 @@ object WebConsolePage {
           <span class="metric" id="previewMeta">预览 --</span>
         </div>
         <p id="error"></p>
+        <div id="monitoringProgress" class="monitoringProgress">
+          <div class="row">
+            <span class="metric">巡检进度</span>
+            <span class="metric" id="monitoringProgressText">0%</span>
+          </div>
+          <div class="progressTrack"><div id="monitoringProgressBar" class="progressBar"></div></div>
+        </div>
       </div>
     </section>
     <aside class="side">
       <button id="startBtn">开始巡视</button>
+      <div class="durationInputs">
+        <label>小时<input id="monitorHours" type="number" min="0" max="168" value="1"></label>
+        <label>分钟<input id="monitorMinutes" type="number" min="0" max="59" value="0"></label>
+      </div>
+      <p class="durationHint">设置为 0 小时 0 分钟表示不限时。</p>
       <button class="secondary" data-action="analyze_now">立即分析</button>
       <button class="secondary" id="torchBtn">开启闪光灯</button>
       <button class="secondary" id="screenBtn">息屏</button>
@@ -212,6 +247,8 @@ object WebConsolePage {
         running = s.isRunning;
         const r = s.lastResult;
         document.getElementById("startBtn").textContent = running ? "暂停巡视" : "开始巡视";
+        document.getElementById("monitorHours").disabled=running;
+        document.getElementById("monitorMinutes").disabled=running;
         document.getElementById("torchBtn").textContent = s.torchEnabled ? "关闭闪光灯" : "开启闪光灯";
         document.getElementById("screenBtn").textContent = s.screenOff ? "点亮屏幕" : "息屏";
         document.getElementById("runState").textContent = running ? "运行中" : "已暂停";
@@ -219,7 +256,32 @@ object WebConsolePage {
         document.getElementById("torch").textContent = "补光 " + (s.torchEnabled ? "开" : "关");
         document.getElementById("cameraSource").textContent = "相机 " + (s.cameraSource || "--");
         document.getElementById("keepAliveState").textContent = s.keepAliveTemporarilyStopped ? "保活 已临时停止" : s.keepAliveServiceRunning ? "保活 运行中" : "保活 已停止";
+        const battery=document.getElementById("batteryState");
+        battery.textContent=s.batteryPercent===null ? "电量 --" : "电量 "+s.batteryPercent+"%"+(s.batteryCharging ? " · 充电中" : "");
+        battery.className="metric"+(s.batteryCharging ? " charging" : Number(s.batteryPercent)<=20 ? " lowBattery" : "");
+        const wifi=document.getElementById("wifiState");
+        const wifiLabels=["极弱","较弱","良好","强"];
+        wifi.textContent=!s.wifiPermissionGranted ? "WiFi 权限未授权" : !s.wifiConnected ? "WiFi 未连接" : "WiFi "+(wifiLabels[s.wifiSignalLevel]||"--")+" · "+s.wifiRssi+" dBm";
+        wifi.className="metric"+(s.wifiConnected&&s.wifiSignalLevel>=2 ? " strongSignal" : s.wifiConnected ? " weakSignal" : "");
+        const stopRemaining=s.monitoringStopAtMillis ? Math.max(0,Math.floor((s.monitoringStopAtMillis-Date.now())/1000)) : null;
+        document.getElementById("stopTime").textContent=stopRemaining===null ? "关闭 不限时" : "关闭 "+String(Math.floor(stopRemaining/3600)).padStart(2,"0")+":"+String(Math.floor((stopRemaining%3600)/60)).padStart(2,"0")+":"+String(stopRemaining%60).padStart(2,"0");
+        const monitoringProgress=document.getElementById("monitoringProgress");
+        const monitoringDuration=s.monitoringStartedAtMillis&&s.monitoringStopAtMillis ? s.monitoringStopAtMillis-s.monitoringStartedAtMillis : 0;
+        const monitoringRatio=monitoringDuration>0 ? Math.max(0,Math.min(1,(Date.now()-s.monitoringStartedAtMillis)/monitoringDuration)) : 0;
+        monitoringProgress.classList.toggle("active", monitoringDuration>0);
+        document.getElementById("monitoringProgressText").textContent=Math.floor(monitoringRatio*100)+"%";
+        document.getElementById("monitoringProgressBar").style.width=(monitoringRatio*100)+"%";
         document.getElementById("summary").textContent = r ? r.summary : s.statusMessage;
+        const analysisDetails=document.getElementById("analysisDetails");
+        analysisDetails.classList.toggle("active", !!s.isAnalyzing);
+        if(s.isAnalyzing){
+          const elapsed=s.analysisStartedAtMillis ? Math.max(0,Math.floor((Date.now()-s.analysisStartedAtMillis)/1000)) : 0;
+          document.getElementById("analysisStage").textContent="阶段 "+(s.analysisStageLabel||"--");
+          document.getElementById("analysisElapsed").textContent="耗时 "+elapsed+" 秒";
+          const firstTokenSeconds=s.analysisFirstTokenAtMillis&&s.analysisStartedAtMillis ? Math.max(0,((s.analysisFirstTokenAtMillis-s.analysisStartedAtMillis)/1000).toFixed(1)) : null;
+          document.getElementById("analysisChars").textContent=s.analysisReceivedChars ? "首字 "+firstTokenSeconds+" 秒 · 已接收 "+s.analysisReceivedChars+" 字" : "等待首字";
+          document.getElementById("summary").textContent=s.statusMessage;
+        }
         document.getElementById("lastTime").textContent = "最近 " + fmtTime(s.lastAnalysisAtMillis);
         document.getElementById("model").textContent = "模型 " + s.settings.openAiModel;
         document.getElementById("confidence").textContent = r ? ("置信度 " + Number(r.confidence).toFixed(2)) : "置信度 --";
@@ -230,7 +292,11 @@ object WebConsolePage {
         if(s.printStatus==="Abnormal") overlay.classList.add("bad"); else if(s.printStatus==="Warning") overlay.classList.add("warn"); else if(s.printStatus==="Normal") overlay.classList.add("good");
       } catch(e) { document.getElementById("summary").textContent = "连接已断开"; }
     }
-    document.getElementById("startBtn").onclick = () => post("/api/control", {action: running ? "stop" : "start"}).then(refresh);
+    document.getElementById("startBtn").onclick = () => {
+      const hours=Math.max(0,Math.min(168,Number(document.getElementById("monitorHours").value)||0));
+      const minutes=Math.max(0,Math.min(59,Number(document.getElementById("monitorMinutes").value)||0));
+      post("/api/control", {action: running ? "stop" : "start", durationMinutes:Math.floor(hours*60+minutes)}).then(refresh);
+    };
     document.getElementById("torchBtn").onclick = () => post("/api/control", {action:"toggle_torch"}).then(refresh);
     document.getElementById("screenBtn").onclick = async () => {
       const button=document.getElementById("screenBtn");

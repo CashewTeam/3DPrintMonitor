@@ -130,7 +130,7 @@ fun CameraPreview(
         lastError?.let(onCameraError)
     }
 
-    LaunchedEffect(torchEnabled) {
+    LaunchedEffect(torchEnabled, cameraRef.value) {
         cameraRef.value?.cameraControl?.enableTorch(torchEnabled)
     }
 }

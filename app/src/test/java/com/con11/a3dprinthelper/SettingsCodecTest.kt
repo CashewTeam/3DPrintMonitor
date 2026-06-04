@@ -36,12 +36,14 @@ class SettingsCodecTest {
         val next = codec.update(
             current,
             JSONObject()
+                .put("captureIntervalMinutes", 999)
                 .put("jpegQuality", 999)
                 .put("webPort", 12)
                 .put("openAiApiKey", ""),
             preserveBlankSecrets = true
         )
 
+        assertEquals(30, next.captureIntervalMinutes)
         assertEquals(100, next.jpegQuality)
         assertEquals(1024, next.webPort)
         assertEquals("secret", next.openAiApiKey)

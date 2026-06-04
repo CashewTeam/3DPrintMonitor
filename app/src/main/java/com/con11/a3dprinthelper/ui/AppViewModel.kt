@@ -11,10 +11,25 @@ import com.con11.a3dprinthelper.monitor.MonitorController
 import com.con11.a3dprinthelper.network.AnalysisResult
 import kotlinx.coroutines.flow.StateFlow
 
+enum class AnalysisStage(val displayName: String) {
+    Idle("空闲"),
+    Preparing("准备分析"),
+    Lighting("补光曝光"),
+    Capturing("取帧与编码"),
+    Uploading("上传图片"),
+    WaitingForResponse("等待模型响应"),
+    Streaming("接收模型输出"),
+    Parsing("解析分析结果"),
+    Completed("分析完成"),
+    Failed("分析失败")
+}
+
 data class MonitorUiState(
     val isRunning: Boolean = false,
     val isAnalyzing: Boolean = false,
     val nextCaptureAtMillis: Long? = null,
+    val monitoringStartedAtMillis: Long? = null,
+    val monitoringStopAtMillis: Long? = null,
     val lastAnalysisAtMillis: Long? = null,
     val lastResult: AnalysisResult? = null,
     val statusMessage: String = "等待开始巡检",
@@ -27,7 +42,11 @@ data class MonitorUiState(
     val lastFrameAtMillis: Long? = null,
     val cameraError: String? = null,
     val keepAliveServiceRunning: Boolean = false,
-    val keepAliveTemporarilyStopped: Boolean = false
+    val keepAliveTemporarilyStopped: Boolean = false,
+    val analysisStage: AnalysisStage = AnalysisStage.Idle,
+    val analysisStartedAtMillis: Long? = null,
+    val analysisFirstTokenAtMillis: Long? = null,
+    val analysisReceivedChars: Int = 0
 )
 
 class AppViewModel(application: Application) : AndroidViewModel(application) {
@@ -62,7 +81,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun currentUiState(): MonitorUiState = controller.currentUiState()
 
-    fun startMonitoring() = controller.startMonitoring()
+    fun startMonitoring(durationMinutes: Int = 0) = controller.startMonitoring(durationMinutes)
 
     fun stopMonitoring() = controller.stopMonitoring()
 

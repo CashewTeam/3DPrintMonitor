@@ -31,19 +31,15 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
-import androidx.lifecycle.lifecycleScope
 import com.con11.a3dprinthelper.monitor.MonitorController
 import com.con11.a3dprinthelper.ui.PrintMonitorApp
 import com.con11.a3dprinthelper.ui.VolumeWakeEvents
 import com.con11.a3dprinthelper.ui.theme._3DPrintHelperTheme
 import android.view.WindowManager
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        requestNotificationPermissionIfNeeded()
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         enableEdgeToEdge()
@@ -53,20 +49,6 @@ class MainActivity : ComponentActivity() {
                     PrintMonitorApp(viewModel = viewModel())
                 }
             }
-        }
-    }
-
-    private fun requestNotificationPermissionIfNeeded() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return
-        val launcher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            if (!granted) {
-                MonitorController.get(applicationContext).reportNotificationPermissionMissing()
-            }
-        }
-        lifecycleScope.launch {
-            delay(800)
-            launcher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
 
@@ -91,12 +73,18 @@ private fun CameraPermissionGate(content: @Composable () -> Unit) {
                 PackageManager.PERMISSION_GRANTED
         )
     }
-    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
-        hasPermission = it
+    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { results ->
+        hasPermission = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+            PackageManager.PERMISSION_GRANTED
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            results[Manifest.permission.POST_NOTIFICATIONS] == false
+        ) {
+            MonitorController.get(context.applicationContext).reportNotificationPermissionMissing()
+        }
     }
 
     LaunchedEffect(Unit) {
-        if (!hasPermission) launcher.launch(Manifest.permission.CAMERA)
+        missingStartupPermissions(context).takeIf { it.isNotEmpty() }?.let(launcher::launch)
     }
 
     if (hasPermission) {
@@ -109,10 +97,26 @@ private fun CameraPermissionGate(content: @Composable () -> Unit) {
                 modifier = Modifier.padding(24.dp)
             ) {
                 Text("需要相机权限才能监控 3D 打印机", style = MaterialTheme.typography.titleMedium)
-                Button(onClick = { launcher.launch(Manifest.permission.CAMERA) }) {
+                Button(onClick = {
+                    missingStartupPermissions(context).takeIf { it.isNotEmpty() }?.let(launcher::launch)
+                }) {
                     Text("授权相机")
                 }
             }
         }
     }
 }
+
+private fun missingStartupPermissions(context: android.content.Context): Array<String> =
+    buildList {
+        add(Manifest.permission.CAMERA)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            add(Manifest.permission.POST_NOTIFICATIONS)
+            add(Manifest.permission.NEARBY_WIFI_DEVICES)
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            add(Manifest.permission.ACCESS_COARSE_LOCATION)
+            add(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+    }.filter {
+        ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
+    }.toTypedArray()

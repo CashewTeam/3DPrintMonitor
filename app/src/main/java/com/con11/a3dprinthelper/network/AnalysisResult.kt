@@ -18,3 +18,11 @@ enum class PrintStatus {
     Abnormal,
     Unknown
 }
+
+sealed interface VisionStreamUpdate {
+    data object Uploading : VisionStreamUpdate
+    data object WaitingForResponse : VisionStreamUpdate
+    data class TextDelta(val receivedChars: Int) : VisionStreamUpdate
+    data object Parsing : VisionStreamUpdate
+    data object FallingBackToNonStreaming : VisionStreamUpdate
+}

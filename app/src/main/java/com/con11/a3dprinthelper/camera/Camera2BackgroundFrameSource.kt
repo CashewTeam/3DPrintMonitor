@@ -36,6 +36,7 @@ class Camera2BackgroundFrameSource(
     private val appContext = context.applicationContext
     private val cameraManager = appContext.getSystemService(Context.CAMERA_SERVICE) as CameraManager
     private val latestFrame = AtomicReference<RawFrame?>(null)
+    private val latestCompressedFrame = AtomicReference<CompressedFrame?>(null)
     private val lastFrameTimestamp = AtomicLong(0L)
     private val lock = Any()
 
@@ -51,15 +52,33 @@ class Camera2BackgroundFrameSource(
 
     override fun latestFrame(): CapturedFrame? {
         val frame = latestFrame.get() ?: return null
-        val jpegBytes = frame.toJpeg(jpegQualityProvider().coerceIn(40, 100))
+        val quality = jpegQualityProvider().coerceIn(40, 100)
+        val cached = latestCompressedFrame.get()
+        if (cached?.timestampMillis == frame.timestampMillis && cached.quality == quality) {
+            return cached.frame
+        }
         return CapturedFrame(
-            jpegBytes = jpegBytes,
+            jpegBytes = frame.toJpeg(quality),
             averageLuma = frame.averageLuma,
             timestampMillis = frame.timestampMillis
-        )
+        ).also {
+            latestCompressedFrame.set(CompressedFrame(frame.timestampMillis, quality, it))
+        }
     }
 
     override fun latestAverageLuma(): Double? = latestFrame.get()?.averageLuma
+
+    override fun latestFrameTimestampMillis(): Long? = latestFrame.get()?.timestampMillis
+
+    override fun setTorchEnabled(enabled: Boolean): Boolean {
+        val handler = backgroundHandler ?: return false
+        val ready = synchronized(lock) {
+            running && captureSession != null && captureRequestBuilder != null
+        }
+        if (!ready) return false
+        handler.post { applyTorch(enabled) }
+        return true
+    }
 
     fun lastFrameAtMillis(): Long = lastFrameTimestamp.get()
 
@@ -238,6 +257,10 @@ class Camera2BackgroundFrameSource(
     private fun updateTorchIfNeeded() {
         val enabled = torchEnabledProvider()
         if (enabled == lastTorchEnabled) return
+        applyTorch(enabled)
+    }
+
+    private fun applyTorch(enabled: Boolean) {
         val session = captureSession ?: return
         val builder = captureRequestBuilder ?: return
         lastTorchEnabled = enabled
@@ -417,6 +440,12 @@ class Camera2BackgroundFrameSource(
         val height: Int,
         val averageLuma: Double,
         val timestampMillis: Long
+    )
+
+    private data class CompressedFrame(
+        val timestampMillis: Long,
+        val quality: Int,
+        val frame: CapturedFrame
     )
 
     private companion object {

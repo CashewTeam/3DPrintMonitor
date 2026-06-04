@@ -11,39 +11,89 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
 
 class OpenAiVisionClient {
-    suspend fun analyze(imageJpeg: ByteArray, settings: AppSettings): AnalysisResult =
+    private val baseClient = OkHttpClient()
+
+    suspend fun analyze(
+        imageJpeg: ByteArray,
+        settings: AppSettings,
+        onUpdate: (VisionStreamUpdate) -> Unit = {}
+    ): AnalysisResult =
         withContext(Dispatchers.IO) {
             require(settings.openAiApiKey.isNotBlank()) { "请先填写 OpenAI API Key" }
 
-            val client = OkHttpClient.Builder()
+            val client = baseClient.newBuilder()
                 .connectTimeout(settings.requestTimeoutSeconds.toLong(), TimeUnit.SECONDS)
                 .readTimeout(settings.requestTimeoutSeconds.toLong(), TimeUnit.SECONDS)
                 .writeTimeout(settings.requestTimeoutSeconds.toLong(), TimeUnit.SECONDS)
                 .build()
 
-            val requestJson = buildRequestJson(imageJpeg, settings)
-            val request = Request.Builder()
-                .url("${settings.openAiBaseUrl.trimEnd('/')}/responses")
-                .addHeader("Authorization", "Bearer ${settings.openAiApiKey}")
-                .addHeader("Content-Type", "application/json")
-                .post(requestJson.toString().toRequestBody(JSON))
-                .build()
-
-            client.newCall(request).execute().use { response ->
-                val body = response.body?.string().orEmpty()
-                if (!response.isSuccessful) {
-                    throw IOException("OpenAI 请求失败 ${response.code}: ${body.take(240)}")
-                }
-                parseResponse(body)
+            onUpdate(VisionStreamUpdate.Uploading)
+            try {
+                executeStreaming(client, imageJpeg, settings, onUpdate)
+            } catch (error: StreamingUnsupportedException) {
+                onUpdate(VisionStreamUpdate.FallingBackToNonStreaming)
+                executeNonStreaming(client, imageJpeg, settings, onUpdate)
             }
         }
 
-    private fun buildRequestJson(imageJpeg: ByteArray, settings: AppSettings): JSONObject {
+    private fun executeStreaming(
+        client: OkHttpClient,
+        imageJpeg: ByteArray,
+        settings: AppSettings,
+        onUpdate: (VisionStreamUpdate) -> Unit
+    ): AnalysisResult {
+        val request = buildRequest(imageJpeg, settings, stream = true)
+        client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                val body = response.body?.string().orEmpty()
+                if (response.code in STREAM_UNSUPPORTED_CODES) {
+                    throw StreamingUnsupportedException()
+                }
+                throw requestFailure(response.code, body)
+            }
+            val contentType = response.header("Content-Type").orEmpty()
+            if (!contentType.contains("text/event-stream", ignoreCase = true)) {
+                val body = response.body?.string().orEmpty()
+                return runCatching { parseResponse(body) }
+                    .getOrElse { throw StreamingUnsupportedException() }
+            }
+            onUpdate(VisionStreamUpdate.WaitingForResponse)
+            return parseEventStream(response, onUpdate)
+        }
+    }
+
+    private fun executeNonStreaming(
+        client: OkHttpClient,
+        imageJpeg: ByteArray,
+        settings: AppSettings,
+        onUpdate: (VisionStreamUpdate) -> Unit
+    ): AnalysisResult {
+        onUpdate(VisionStreamUpdate.Uploading)
+        client.newCall(buildRequest(imageJpeg, settings, stream = false)).execute().use { response ->
+            val body = response.body?.string().orEmpty()
+            if (!response.isSuccessful) throw requestFailure(response.code, body)
+            onUpdate(VisionStreamUpdate.Parsing)
+            return parseResponse(body)
+        }
+    }
+
+    private fun buildRequest(imageJpeg: ByteArray, settings: AppSettings, stream: Boolean): Request {
+        val requestJson = buildRequestJson(imageJpeg, settings).put("stream", stream)
+        return Request.Builder()
+            .url("${settings.openAiBaseUrl.trimEnd('/')}/responses")
+            .addHeader("Authorization", "Bearer ${settings.openAiApiKey}")
+            .addHeader("Content-Type", "application/json")
+            .post(requestJson.toString().toRequestBody(JSON))
+            .build()
+    }
+
+    internal fun buildRequestJson(imageJpeg: ByteArray, settings: AppSettings): JSONObject {
         val base64 = Base64.encodeToString(imageJpeg, Base64.NO_WRAP)
         val imageUrl = "data:image/jpeg;base64,$base64"
         val content = JSONArray()
@@ -64,9 +114,72 @@ class OpenAiVisionClient {
             .put("input", input)
     }
 
-    private fun parseResponse(body: String): AnalysisResult {
+    private fun parseEventStream(
+        response: Response,
+        onUpdate: (VisionStreamUpdate) -> Unit
+    ): AnalysisResult {
+        val source = response.body?.source() ?: throw IOException("模型未返回响应内容")
+        val payloads = sequence {
+            while (!source.exhausted()) {
+                val line = source.readUtf8Line() ?: break
+                if (!line.startsWith("data:")) continue
+                val data = line.removePrefix("data:").trim()
+                if (data.isNotBlank() && data != "[DONE]") yield(data)
+            }
+        }
+        return parseEventPayloads(payloads, onUpdate)
+    }
+
+    internal fun parseEventPayloads(
+        payloads: Sequence<String>,
+        onUpdate: (VisionStreamUpdate) -> Unit = {}
+    ): AnalysisResult {
+        val output = StringBuilder()
+        var receivedDelta = false
+        for (data in payloads) {
+            val event = runCatching { JSONObject(data) }.getOrNull()
+                ?: if (!receivedDelta) throw StreamingUnsupportedException() else continue
+            when (event.optString("type")) {
+                "response.output_text.delta" -> {
+                    val delta = event.optString("delta")
+                    if (delta.isNotEmpty()) {
+                        receivedDelta = true
+                        output.append(delta)
+                        onUpdate(
+                            VisionStreamUpdate.TextDelta(receivedChars = output.length)
+                        )
+                    }
+                }
+                "response.completed", "response.output_text.done" -> {
+                    val completedText = output.toString().ifBlank {
+                        event.optString("text").ifBlank {
+                            event.optJSONObject("response")?.let(::extractOutputText).orEmpty()
+                        }
+                    }
+                    if (completedText.isNotBlank()) {
+                        onUpdate(VisionStreamUpdate.Parsing)
+                        return parseOutputText(completedText)
+                    }
+                }
+                "response.failed", "error" -> {
+                    val message = event.optJSONObject("error")?.optString("message")
+                        ?: event.optString("message")
+                    throw IOException(message.ifBlank { "模型流式响应失败" })
+                }
+            }
+        }
+        if (!receivedDelta) throw StreamingUnsupportedException()
+        onUpdate(VisionStreamUpdate.Parsing)
+        return parseOutputText(output.toString())
+    }
+
+    internal fun parseResponse(body: String): AnalysisResult {
         val root = JSONObject(body)
         val text = root.optString("output_text").ifBlank { extractOutputText(root) }
+        return parseOutputText(text)
+    }
+
+    internal fun parseOutputText(text: String): AnalysisResult {
         val jsonText = extractJsonObject(text)
         return try {
             val json = JSONObject(jsonText)
@@ -86,6 +199,9 @@ class OpenAiVisionClient {
             )
         }
     }
+
+    private fun requestFailure(code: Int, body: String): IOException =
+        IOException("OpenAI 请求失败 $code: ${body.take(240)}")
 
     private fun extractOutputText(root: JSONObject): String {
         val output = root.optJSONArray("output") ?: return ""
@@ -140,5 +256,8 @@ class OpenAiVisionClient {
 
     private companion object {
         val JSON = "application/json; charset=utf-8".toMediaType()
+        val STREAM_UNSUPPORTED_CODES = setOf(400, 404, 405, 415, 422)
     }
+
+    private class StreamingUnsupportedException : IOException()
 }

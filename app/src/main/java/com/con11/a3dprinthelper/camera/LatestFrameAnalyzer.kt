@@ -13,6 +13,7 @@ class LatestFrameAnalyzer(
     private val jpegQualityProvider: () -> Int
 ) : ImageAnalysis.Analyzer {
     private val latestFrame = AtomicReference<RawFrame?>(null)
+    private val latestCompressedFrame = AtomicReference<CompressedFrame?>(null)
 
     override fun analyze(image: ImageProxy) {
         try {
@@ -22,7 +23,8 @@ class LatestFrameAnalyzer(
                     nv21Bytes = yuv420ToNv21(image),
                     width = image.width,
                     height = image.height,
-                    averageLuma = luma
+                    averageLuma = luma,
+                    timestampMillis = System.currentTimeMillis()
                 )
             )
         } catch (_: Throwable) {
@@ -35,11 +37,23 @@ class LatestFrameAnalyzer(
 
     fun latest(): CapturedFrame? {
         val frame = latestFrame.get() ?: return null
-        val jpegBytes = frame.toJpeg(jpegQualityProvider().coerceIn(40, 100))
-        return CapturedFrame(jpegBytes = jpegBytes, averageLuma = frame.averageLuma)
+        val quality = jpegQualityProvider().coerceIn(40, 100)
+        val cached = latestCompressedFrame.get()
+        if (cached?.timestampMillis == frame.timestampMillis && cached.quality == quality) {
+            return cached.frame
+        }
+        return CapturedFrame(
+            jpegBytes = frame.toJpeg(quality),
+            averageLuma = frame.averageLuma,
+            timestampMillis = frame.timestampMillis
+        ).also {
+            latestCompressedFrame.set(CompressedFrame(frame.timestampMillis, quality, it))
+        }
     }
 
     fun latestAverageLuma(): Double? = latestFrame.get()?.averageLuma
+
+    fun latestTimestampMillis(): Long? = latestFrame.get()?.timestampMillis
 
     private fun ImageProxy.averageLuma(): Double {
         val buffer = planes.firstOrNull()?.buffer?.duplicate() ?: return 0.0
@@ -142,6 +156,13 @@ class LatestFrameAnalyzer(
         val nv21Bytes: ByteArray,
         val width: Int,
         val height: Int,
-        val averageLuma: Double
+        val averageLuma: Double,
+        val timestampMillis: Long
+    )
+
+    private data class CompressedFrame(
+        val timestampMillis: Long,
+        val quality: Int,
+        val frame: CapturedFrame
     )
 }

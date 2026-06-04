@@ -45,8 +45,9 @@ class MonitorWebServer(
 
     private fun handleControl(session: IHTTPSession): Response {
         val body = session.bodyText()
-        val action = JSONObject(body.ifBlank { "{}" }).optString("action")
-        bridge.control(action)
+        val json = JSONObject(body.ifBlank { "{}" })
+        val action = json.optString("action")
+        bridge.control(action, json.optInt("durationMinutes", 0))
         return jsonResponse(JSONObject().put("ok", true).toString())
     }
 
@@ -69,11 +70,20 @@ class MonitorWebServer(
     private fun statusJson(): JSONObject {
         val ui = bridge.uiState()
         val settings = bridge.settings()
+        val battery = bridge.batteryStatus()
+        val wifi = bridge.wifiStatus()
         val result = ui.lastResult
         return JSONObject()
             .put("isRunning", ui.isRunning)
             .put("isAnalyzing", ui.isAnalyzing)
+            .put("analysisStage", ui.analysisStage.name)
+            .put("analysisStageLabel", ui.analysisStage.displayName)
+            .put("analysisStartedAtMillis", ui.analysisStartedAtMillis ?: JSONObject.NULL)
+            .put("analysisFirstTokenAtMillis", ui.analysisFirstTokenAtMillis ?: JSONObject.NULL)
+            .put("analysisReceivedChars", ui.analysisReceivedChars)
             .put("nextCaptureAtMillis", ui.nextCaptureAtMillis ?: JSONObject.NULL)
+            .put("monitoringStartedAtMillis", ui.monitoringStartedAtMillis ?: JSONObject.NULL)
+            .put("monitoringStopAtMillis", ui.monitoringStopAtMillis ?: JSONObject.NULL)
             .put("lastAnalysisAtMillis", ui.lastAnalysisAtMillis ?: JSONObject.NULL)
             .put("statusMessage", ui.statusMessage)
             .put("errorMessage", ui.errorMessage ?: JSONObject.NULL)
@@ -85,6 +95,12 @@ class MonitorWebServer(
             .put("cameraError", ui.cameraError ?: JSONObject.NULL)
             .put("keepAliveServiceRunning", ui.keepAliveServiceRunning)
             .put("keepAliveTemporarilyStopped", ui.keepAliveTemporarilyStopped)
+            .put("batteryPercent", battery.percent ?: JSONObject.NULL)
+            .put("batteryCharging", battery.charging)
+            .put("wifiConnected", wifi.connected)
+            .put("wifiRssi", wifi.rssi ?: JSONObject.NULL)
+            .put("wifiSignalLevel", wifi.level ?: JSONObject.NULL)
+            .put("wifiPermissionGranted", wifi.permissionGranted)
             .put("webUrl", NetworkAddress.localHttpUrl(portNumber))
             .put("webPreviewScalePercent", settings.webPreviewScalePercent)
             .put("webPreviewFps", settings.webPreviewFps)

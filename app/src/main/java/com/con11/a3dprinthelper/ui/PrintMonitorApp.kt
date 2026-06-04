@@ -5,6 +5,8 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.os.PowerManager
 import android.view.WindowManager
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -27,10 +29,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Divider
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -68,6 +72,7 @@ import com.con11.a3dprinthelper.camera.CameraFrameSource
 import com.con11.a3dprinthelper.camera.CameraSourceName
 import com.con11.a3dprinthelper.camera.CapturedFrame
 import com.con11.a3dprinthelper.camera.LatestFrameAnalyzer
+import androidx.camera.core.Camera
 import com.con11.a3dprinthelper.data.AppSettings
 import com.con11.a3dprinthelper.data.DEFAULT_PROMPT
 import com.con11.a3dprinthelper.data.SettingControlType
@@ -78,6 +83,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.max
+import java.util.concurrent.atomic.AtomicReference
 
 private enum class AppPage {
     Preview,
@@ -89,12 +95,21 @@ fun PrintMonitorApp(viewModel: AppViewModel) {
     val settings by viewModel.settings.collectAsState()
     val uiState by viewModel.uiState.collectAsState()
     var page by remember { mutableStateOf(AppPage.Preview) }
+    var showMonitoringDurationDialog by remember { mutableStateOf(false) }
     val analyzer = remember { LatestFrameAnalyzer { viewModel.settings.value.jpegQuality } }
-    val foregroundFrameSource = remember(analyzer) {
+    val foregroundCamera = remember { AtomicReference<Camera?>(null) }
+    val foregroundFrameSource = remember(analyzer, foregroundCamera) {
         object : CameraFrameSource {
             override val name = CameraSourceName.Foreground
             override fun latestFrame(): CapturedFrame? = analyzer.latest()
             override fun latestAverageLuma(): Double? = analyzer.latestAverageLuma()
+            override fun latestFrameTimestampMillis(): Long? = analyzer.latestTimestampMillis()
+            override fun setTorchEnabled(enabled: Boolean): Boolean {
+                val camera = foregroundCamera.get() ?: return false
+                if (!camera.cameraInfo.hasFlashUnit()) return false
+                camera.cameraControl.enableTorch(enabled)
+                return true
+            }
         }
     }
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -125,6 +140,7 @@ fun PrintMonitorApp(viewModel: AppViewModel) {
                     viewModel.syncService()
                 }
                 Lifecycle.Event.ON_PAUSE -> {
+                    foregroundCamera.set(null)
                     viewModel.unregisterFrameSource(foregroundFrameSource)
                     viewModel.setForegroundVisible(false)
                     viewModel.syncService()
@@ -136,6 +152,7 @@ fun PrintMonitorApp(viewModel: AppViewModel) {
         viewModel.setForegroundVisible(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
+            foregroundCamera.set(null)
             viewModel.unregisterFrameSource(foregroundFrameSource)
             viewModel.setForegroundVisible(false)
             viewModel.syncService()
@@ -199,12 +216,13 @@ fun PrintMonitorApp(viewModel: AppViewModel) {
                     uiState = uiState,
                     webUrl = uiState.webUrl.ifBlank { viewModel.currentSettings().let { "http://手机IP:${it.webPort}/" } },
                     analyzer = analyzer,
+                    onCameraReady = { foregroundCamera.set(it) },
                     onStartStop = {
                         if (uiState.isRunning) {
                             wakeScreen()
                             viewModel.stopMonitoring()
                         } else {
-                            viewModel.startMonitoring()
+                            showMonitoringDurationDialog = true
                         }
                     },
                     onAnalyzeNow = viewModel::analyzeNow,
@@ -245,6 +263,15 @@ fun PrintMonitorApp(viewModel: AppViewModel) {
                     }
             )
         }
+        if (showMonitoringDurationDialog) {
+            MonitoringDurationDialog(
+                onDismiss = { showMonitoringDurationDialog = false },
+                onStart = { durationMinutes ->
+                    showMonitoringDurationDialog = false
+                    viewModel.startMonitoring(durationMinutes)
+                }
+            )
+        }
     }
 }
 
@@ -254,6 +281,7 @@ private fun PreviewPage(
     uiState: MonitorUiState,
     webUrl: String,
     analyzer: LatestFrameAnalyzer,
+    onCameraReady: (Camera) -> Unit,
     onStartStop: () -> Unit,
     onAnalyzeNow: () -> Unit,
     onToggleTorch: () -> Unit,
@@ -278,6 +306,7 @@ private fun PreviewPage(
             CameraPreview(
                 analyzer = analyzer,
                 torchEnabled = uiState.torchEnabled,
+                onCameraReady = onCameraReady,
                 onCameraError = onCameraError,
                 modifier = Modifier.fillMaxSize()
             )
@@ -312,6 +341,23 @@ private fun CameraStatusOverlay(
     webUrl: String,
     modifier: Modifier = Modifier
 ) {
+    var analysisClockMillis by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(uiState.isAnalyzing, uiState.analysisStartedAtMillis, uiState.monitoringStopAtMillis) {
+        while (uiState.isAnalyzing || uiState.monitoringStopAtMillis != null) {
+            analysisClockMillis = System.currentTimeMillis()
+            kotlinx.coroutines.delay(1_000)
+        }
+    }
+    val monitoringProgress = monitoringProgress(
+        startedAtMillis = uiState.monitoringStartedAtMillis,
+        stopAtMillis = uiState.monitoringStopAtMillis,
+        nowMillis = analysisClockMillis
+    )
+    val animatedMonitoringProgress by animateFloatAsState(
+        targetValue = monitoringProgress,
+        animationSpec = tween(durationMillis = 450),
+        label = "monitoringProgress"
+    )
     val bg = when (uiState.lastResult?.status) {
         PrintStatus.Abnormal -> Color(0xD9B3261E)
         PrintStatus.Warning -> Color(0xD9B45F06)
@@ -338,6 +384,13 @@ private fun CameraStatusOverlay(
                 color = Color(0xFFE6EDF3),
                 style = MaterialTheme.typography.bodyMedium
             )
+            uiState.monitoringStopAtMillis?.let {
+                Text(
+                    text = "关闭 ${remainingDurationText(it, analysisClockMillis)}",
+                    color = Color(0xFFFFCF9F),
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
             Text(
                 text = "${settings.captureIntervalMinutes} 分钟 · 自动闪光灯${if (settings.autoFlashEnabled) "开" else "关"}",
                 color = Color(0xFFB8C3CC),
@@ -346,10 +399,35 @@ private fun CameraStatusOverlay(
                 overflow = TextOverflow.Ellipsis
             )
         }
+        if (uiState.isAnalyzing) {
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                OverlayMetric("阶段", uiState.analysisStage.displayName)
+                if (uiState.analysisReceivedChars > 0) {
+                    val firstTokenSeconds = (
+                        (uiState.analysisFirstTokenAtMillis ?: analysisClockMillis) -
+                            (uiState.analysisStartedAtMillis ?: analysisClockMillis)
+                        ) / 1_000f
+                    OverlayMetric(
+                        "耗时",
+                        "${((analysisClockMillis - (uiState.analysisStartedAtMillis ?: analysisClockMillis)) / 1000)} 秒"
+                    )
+                    OverlayMetric(
+                        "输出",
+                        "首字 %.1f 秒 · 已接收 ${uiState.analysisReceivedChars} 字"
+                            .format(firstTokenSeconds)
+                    )
+                } else {
+                    OverlayMetric(
+                        "等待首字",
+                        "${((analysisClockMillis - (uiState.analysisStartedAtMillis ?: analysisClockMillis)) / 1000)} 秒"
+                    )
+                }
+            }
+        }
         Text(
-            text = uiState.lastResult?.summary ?: uiState.statusMessage,
+            text = if (uiState.isAnalyzing) uiState.statusMessage else uiState.lastResult?.summary ?: uiState.statusMessage,
             color = Color(0xFFE6EDF3),
-            maxLines = 2,
+            maxLines = if (uiState.isAnalyzing) 3 else 2,
             overflow = TextOverflow.Ellipsis,
             style = MaterialTheme.typography.bodyMedium
         )
@@ -397,7 +475,78 @@ private fun CameraStatusOverlay(
                 style = MaterialTheme.typography.bodySmall
             )
         }
+        if (uiState.monitoringStopAtMillis != null) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("巡检进度", color = Color(0xFFD6E1EA), style = MaterialTheme.typography.bodySmall)
+                Text(
+                    "${(animatedMonitoringProgress * 100).toInt()}%",
+                    color = Color(0xFFFFCF9F),
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+            LinearProgressIndicator(
+                progress = { animatedMonitoringProgress },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(6.dp)
+                    .clip(RoundedCornerShape(3.dp)),
+                color = Color(0xFFFFB74D),
+                trackColor = Color(0x4DFFFFFF)
+            )
+        }
     }
+}
+
+@Composable
+private fun MonitoringDurationDialog(
+    onDismiss: () -> Unit,
+    onStart: (Int) -> Unit
+) {
+    var hours by remember { mutableStateOf("1") }
+    var minutes by remember { mutableStateOf("0") }
+    val normalizedHours = hours.toIntOrNull()?.coerceIn(0, 168) ?: 0
+    val normalizedMinutes = minutes.toIntOrNull()?.coerceIn(0, 59) ?: 0
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("设置巡检关闭时间") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("巡检将在指定时长后自动暂停。设置为 0 小时 0 分钟表示不限时。")
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    OutlinedTextField(
+                        value = hours,
+                        onValueChange = { hours = it.filter(Char::isDigit).take(3) },
+                        label = { Text("小时") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = minutes,
+                        onValueChange = { minutes = it.filter(Char::isDigit).take(2) },
+                        label = { Text("分钟") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = { onStart(normalizedHours * 60 + normalizedMinutes) }) {
+                Text("开始巡检")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        }
+    )
 }
 
 @Composable
@@ -696,6 +845,20 @@ private fun countdownText(nextAtMillis: Long?): String {
     val minutes = remaining / 60_000
     val seconds = (remaining % 60_000) / 1_000
     return "下次：%02d:%02d".format(minutes, seconds)
+}
+
+private fun remainingDurationText(stopAtMillis: Long, nowMillis: Long): String {
+    val remainingSeconds = max(0L, stopAtMillis - nowMillis) / 1_000
+    val hours = remainingSeconds / 3_600
+    val minutes = (remainingSeconds % 3_600) / 60
+    val seconds = remainingSeconds % 60
+    return "%02d:%02d:%02d".format(hours, minutes, seconds)
+}
+
+private fun monitoringProgress(startedAtMillis: Long?, stopAtMillis: Long?, nowMillis: Long): Float {
+    if (startedAtMillis == null || stopAtMillis == null || stopAtMillis <= startedAtMillis) return 0f
+    return ((nowMillis - startedAtMillis).toFloat() / (stopAtMillis - startedAtMillis))
+        .coerceIn(0f, 1f)
 }
 
 private fun Long.formatTime(): String =

@@ -2,7 +2,15 @@ package com.con11.a3dprinthelper.monitor
 
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.os.Build
+import android.os.BatteryManager
+import android.Manifest
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.net.wifi.WifiInfo
+import android.net.wifi.WifiManager
 import androidx.core.content.ContextCompat
 import com.con11.a3dprinthelper.camera.CameraFrameSource
 import com.con11.a3dprinthelper.camera.CameraSourceName
@@ -16,11 +24,15 @@ import com.con11.a3dprinthelper.data.SettingsSchemaRepository
 import com.con11.a3dprinthelper.network.AnalysisResult
 import com.con11.a3dprinthelper.network.BarkNotifier
 import com.con11.a3dprinthelper.network.OpenAiVisionClient
+import com.con11.a3dprinthelper.network.VisionStreamUpdate
 import com.con11.a3dprinthelper.power.ShizukuScreenPowerController
 import com.con11.a3dprinthelper.service.MonitoringService
+import com.con11.a3dprinthelper.ui.AnalysisStage
 import com.con11.a3dprinthelper.ui.MonitorUiState
 import com.con11.a3dprinthelper.web.MonitorWebServer
 import com.con11.a3dprinthelper.web.NetworkAddress
+import com.con11.a3dprinthelper.web.BatteryStatus
+import com.con11.a3dprinthelper.web.WifiStatus
 import com.con11.a3dprinthelper.web.WebControlBridge
 import java.net.BindException
 import kotlinx.coroutines.CoroutineScope
@@ -34,6 +46,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
 
 class MonitorController private constructor(private val appContext: Context) {
@@ -50,6 +63,7 @@ class MonitorController private constructor(private val appContext: Context) {
     private var activeFrameSource: CameraFrameSource? = null
     private var lastGoodFrame: CapturedFrame? = null
     private var loopJob: Job? = null
+    private var timedStopJob: Job? = null
     private var lastNotificationAtMillis = 0L
     private var lastNotificationKey = ""
     private var manualTorchOverride: Boolean? = null
@@ -188,23 +202,38 @@ class MonitorController private constructor(private val appContext: Context) {
         }
     }
 
-    fun startMonitoring() {
+    fun startMonitoring(durationMinutes: Int = 0) {
         if (loopJob?.isActive == true) return
+        timedStopJob?.cancel()
+        timedStopJob = null
+        val normalizedDurationMinutes = durationMinutes.coerceIn(0, MAX_MONITORING_DURATION_MINUTES)
+        val startedAtMillis = System.currentTimeMillis()
+        val stopAtMillis = normalizedDurationMinutes.takeIf { it > 0 }
+            ?.let { startedAtMillis + it * 60_000L }
         autoScreenOffTriggered = false
         mutableUiState.update {
             it.copy(
                 isRunning = true,
-                statusMessage = "巡检运行中",
+                statusMessage = if (stopAtMillis == null) "巡检运行中" else "巡检运行中，已设置定时关闭",
                 errorMessage = null,
-                nextCaptureAtMillis = System.currentTimeMillis()
+                nextCaptureAtMillis = System.currentTimeMillis(),
+                monitoringStartedAtMillis = startedAtMillis.takeIf { stopAtMillis != null },
+                monitoringStopAtMillis = stopAtMillis
             )
+        }
+        if (stopAtMillis != null) {
+            timedStopJob = scope.launch {
+                delay((stopAtMillis - System.currentTimeMillis()).coerceAtLeast(0L))
+                timedStopJob = null
+                stopMonitoring("定时巡检已结束")
+            }
         }
         syncService()
         syncWebServer()
         loopJob = scope.launch {
             while (true) {
                 runAnalysis()
-                val intervalMillis = settings.value.captureIntervalMinutes.coerceAtLeast(1) * 60_000L
+                val intervalMillis = settings.value.captureIntervalMinutes.coerceIn(1, 30) * 60_000L
                 val nextAt = System.currentTimeMillis() + intervalMillis
                 mutableUiState.update { it.copy(nextCaptureAtMillis = nextAt, statusMessage = "等待下一次巡检") }
                 while (System.currentTimeMillis() < nextAt && mutableUiState.value.isRunning) {
@@ -215,7 +244,11 @@ class MonitorController private constructor(private val appContext: Context) {
         }
     }
 
-    fun stopMonitoring() {
+    fun stopMonitoring() = stopMonitoring("巡检已暂停")
+
+    private fun stopMonitoring(statusMessage: String) {
+        timedStopJob?.cancel()
+        timedStopJob = null
         loopJob?.cancel()
         loopJob = null
         if (autoScreenOffTriggered && mutableUiState.value.screenOff) {
@@ -228,7 +261,9 @@ class MonitorController private constructor(private val appContext: Context) {
                 isAnalyzing = false,
                 torchEnabled = manualTorchOverride ?: false,
                 nextCaptureAtMillis = null,
-                statusMessage = "巡检已暂停"
+                monitoringStartedAtMillis = null,
+                monitoringStopAtMillis = null,
+                statusMessage = statusMessage
             )
         }
         syncService()
@@ -270,11 +305,12 @@ class MonitorController private constructor(private val appContext: Context) {
 
     fun toggleTorch() {
         val next = !(manualTorchOverride ?: mutableUiState.value.torchEnabled)
-        manualTorchOverride = next
+        manualTorchOverride = if (next) true else null
+        activeFrameSource?.setTorchEnabled(next)
         mutableUiState.update {
             it.copy(
                 torchEnabled = next,
-                statusMessage = if (next) "闪光灯已开启" else "闪光灯已关闭",
+                statusMessage = if (next) "闪光灯已开启" else "闪光灯已关闭，拍摄时允许自动补光",
                 errorMessage = null
             )
         }
@@ -374,6 +410,8 @@ class MonitorController private constructor(private val appContext: Context) {
             getDefaultSettings = ::defaultSettingsJson,
             decodeSettings = ::updateSettingsFromJson,
             getUiState = ::currentUiState,
+            getBatteryStatus = ::currentBatteryStatus,
+            getWifiStatus = ::currentWifiStatus,
             getFrame = { latestWebFrame() },
             startMonitoring = ::startMonitoring,
             stopMonitoring = ::stopMonitoring,
@@ -415,6 +453,54 @@ class MonitorController private constructor(private val appContext: Context) {
         }
     }
 
+    private fun currentBatteryStatus(): BatteryStatus {
+        val battery = appContext.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val level = battery?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = battery?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+        val status = battery?.getIntExtra(BatteryManager.EXTRA_STATUS, BatteryManager.BATTERY_STATUS_UNKNOWN)
+            ?: BatteryManager.BATTERY_STATUS_UNKNOWN
+        return BatteryStatus(
+            percent = if (level >= 0 && scale > 0) (level * 100 / scale).coerceIn(0, 100) else null,
+            charging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
+                status == BatteryManager.BATTERY_STATUS_FULL
+        )
+    }
+
+    @Suppress("DEPRECATION")
+    private fun currentWifiStatus(): WifiStatus {
+        val runtimePermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            Manifest.permission.NEARBY_WIFI_DEVICES
+        } else {
+            Manifest.permission.ACCESS_FINE_LOCATION
+        }
+        val permissionGranted = Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
+            ContextCompat.checkSelfPermission(appContext, runtimePermission) == PackageManager.PERMISSION_GRANTED
+        if (!permissionGranted) {
+            return WifiStatus(connected = false, rssi = null, level = null, permissionGranted = false)
+        }
+        return runCatching {
+            val wifiManager = appContext.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            val info = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val connectivityManager = appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+                connectivityManager.getNetworkCapabilities(connectivityManager.activeNetwork)
+                    ?.takeIf { it.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) }
+                    ?.transportInfo as? WifiInfo
+            } else {
+                wifiManager.connectionInfo
+            }
+            val rssi = info?.rssi?.takeUnless { it == INVALID_WIFI_RSSI }
+            val connected = wifiManager.isWifiEnabled && info != null && rssi != null
+            WifiStatus(
+                connected = connected,
+                rssi = if (connected) rssi else null,
+                level = rssi?.takeIf { connected }?.let { WifiManager.calculateSignalLevel(it, WIFI_SIGNAL_LEVELS) },
+                permissionGranted = true
+            )
+        }.getOrElse {
+            WifiStatus(connected = false, rssi = null, level = null, permissionGranted = true)
+        }
+    }
+
     private fun stopWebServer() {
         webServerRetryJob?.cancel()
         webServerRetryJob = null
@@ -437,27 +523,46 @@ class MonitorController private constructor(private val appContext: Context) {
     private suspend fun runAnalysis() {
         if (mutableUiState.value.isAnalyzing) return
         val currentSettings = settings.value
-        mutableUiState.update { it.copy(isAnalyzing = true, statusMessage = "正在拍照分析", errorMessage = null) }
+        val startedAt = System.currentTimeMillis()
+        mutableUiState.update {
+            it.copy(
+                isAnalyzing = true,
+                statusMessage = "正在准备分析",
+                errorMessage = null,
+                analysisStage = AnalysisStage.Preparing,
+                analysisStartedAtMillis = startedAt,
+                analysisFirstTokenAtMillis = null,
+                analysisReceivedChars = 0
+            )
+        }
         val result = runCatching {
             val frame = captureFrameWithFlash(currentSettings)
-            openAiClient.analyze(frame.jpegBytes, currentSettings)
-        }.recoverCatching {
-            delay(1_000)
-            val frame = captureFrameWithFlash(currentSettings)
-            openAiClient.analyze(frame.jpegBytes, currentSettings)
+            runCatching {
+                openAiClient.analyze(frame.jpegBytes, currentSettings, ::onVisionStreamUpdate)
+            }.recoverCatching { error ->
+                if (mutableUiState.value.analysisReceivedChars > 0) throw error
+                mutableUiState.update { state ->
+                    state.copy(
+                        analysisStage = AnalysisStage.Uploading,
+                        statusMessage = "网络请求失败，正在复用本次照片重试"
+                    )
+                }
+                delay(1_000)
+                openAiClient.analyze(frame.jpegBytes, currentSettings, ::onVisionStreamUpdate)
+            }.getOrThrow()
         }.onFailure {
             mutableUiState.update { state ->
                 state.copy(
                     isAnalyzing = false,
                     torchEnabled = manualTorchOverride ?: false,
                     statusMessage = "分析失败",
-                    errorMessage = it.message ?: "分析失败"
+                    errorMessage = it.message ?: "分析失败",
+                    analysisStage = AnalysisStage.Failed
                 )
             }
         }.getOrNull()
 
         if (result != null) {
-            maybeNotify(result, currentSettings)
             mutableUiState.update {
                 it.copy(
                     isAnalyzing = false,
@@ -465,25 +570,107 @@ class MonitorController private constructor(private val appContext: Context) {
                     lastAnalysisAtMillis = System.currentTimeMillis(),
                     lastResult = result,
                     statusMessage = result.summary,
-                    errorMessage = null
+                    errorMessage = null,
+                    analysisStage = AnalysisStage.Completed
                 )
             }
+            maybeNotify(result, currentSettings)
         }
     }
 
     private suspend fun captureFrameWithFlash(settings: AppSettings): CapturedFrame {
         val luma = activeFrameSource?.latestAverageLuma() ?: latestLumaProvider?.invoke()
-        val useTorch = manualTorchOverride ?: (settings.autoFlashEnabled && (luma ?: 255.0) < 70.0)
+        val requestedTorch = manualTorchOverride ?: (settings.autoFlashEnabled && (luma ?: 255.0) < AUTO_FLASH_LUMA_THRESHOLD)
         val restoreTorch = manualTorchOverride ?: false
+        val torchRequestedAtMillis = System.currentTimeMillis()
+        val torchApplied = if (requestedTorch) requestTorchWithRetry(true) else false
+        val useTorch = requestedTorch && torchApplied
         return try {
-            mutableUiState.update { it.copy(torchEnabled = useTorch, statusMessage = if (useTorch) "补光曝光中" else "正在拍照") }
-            if (useTorch) delay(900)
-            val frame = refreshLastGoodFrame() ?: error("相机尚未提供可分析画面")
-            mutableUiState.update { it.copy(statusMessage = "拍照完成，正在识别") }
+            mutableUiState.update {
+                it.copy(
+                    torchEnabled = useTorch,
+                    statusMessage = when {
+                        useTorch -> "补光已开启，正在等待曝光稳定"
+                        requestedTorch -> "当前相机无法开启补光，正在取帧"
+                        else -> "正在取帧"
+                    },
+                    analysisStage = if (useTorch) AnalysisStage.Lighting else AnalysisStage.Capturing
+                )
+            }
+            if (useTorch) {
+                delay(TORCH_EXPOSURE_SETTLE_MILLIS)
+                waitForFrameAfter(torchRequestedAtMillis + TORCH_MIN_FRAME_AGE_MILLIS)
+            }
+            mutableUiState.update {
+                it.copy(
+                    statusMessage = "正在取帧并编码 JPEG",
+                    analysisStage = AnalysisStage.Capturing
+                )
+            }
+            val frame = withContext(Dispatchers.Default) {
+                refreshLastGoodFrame()
+            } ?: error("相机尚未提供可分析画面")
+            mutableUiState.update {
+                it.copy(
+                    statusMessage = "拍照完成，正在上传",
+                    analysisStage = AnalysisStage.Uploading
+                )
+            }
             frame
         } finally {
+            if (useTorch || restoreTorch) {
+                requestTorchWithRetry(restoreTorch)
+            }
             mutableUiState.update { it.copy(torchEnabled = restoreTorch) }
             yield()
+        }
+    }
+
+    private suspend fun requestTorchWithRetry(enabled: Boolean): Boolean {
+        repeat(TORCH_REQUEST_ATTEMPTS) { attempt ->
+            if (activeFrameSource?.setTorchEnabled(enabled) == true) return true
+            if (attempt + 1 < TORCH_REQUEST_ATTEMPTS) delay(TORCH_REQUEST_RETRY_MILLIS)
+        }
+        return false
+    }
+
+    private suspend fun waitForFrameAfter(minTimestampMillis: Long) {
+        val deadline = System.currentTimeMillis() + TORCH_FRESH_FRAME_TIMEOUT_MILLIS
+        while (System.currentTimeMillis() < deadline) {
+            val timestamp = activeFrameSource?.latestFrameTimestampMillis()
+            if (timestamp != null && timestamp >= minTimestampMillis) return
+            delay(TORCH_FRAME_POLL_MILLIS)
+        }
+    }
+
+    private fun onVisionStreamUpdate(update: VisionStreamUpdate) {
+        mutableUiState.update { state ->
+            when (update) {
+                VisionStreamUpdate.Uploading -> state.copy(
+                    analysisStage = AnalysisStage.Uploading,
+                    statusMessage = "正在上传图片"
+                )
+                VisionStreamUpdate.WaitingForResponse -> state.copy(
+                    analysisStage = AnalysisStage.WaitingForResponse,
+                    statusMessage = "图片已发送，等待模型响应"
+                )
+                is VisionStreamUpdate.TextDelta -> {
+                    state.copy(
+                        analysisStage = AnalysisStage.Streaming,
+                        statusMessage = "正在接收模型输出",
+                        analysisFirstTokenAtMillis = state.analysisFirstTokenAtMillis ?: System.currentTimeMillis(),
+                        analysisReceivedChars = update.receivedChars
+                    )
+                }
+                VisionStreamUpdate.Parsing -> state.copy(
+                    analysisStage = AnalysisStage.Parsing,
+                    statusMessage = "模型输出完成，正在解析"
+                )
+                VisionStreamUpdate.FallingBackToNonStreaming -> state.copy(
+                    analysisStage = AnalysisStage.WaitingForResponse,
+                    statusMessage = "接口不支持流式输出，已切换兼容模式"
+                )
+            }
         }
     }
 
@@ -533,6 +720,16 @@ class MonitorController private constructor(private val appContext: Context) {
 
     companion object {
         private const val WEB_START_MAX_RETRIES = 8
+        private const val WIFI_SIGNAL_LEVELS = 4
+        private const val INVALID_WIFI_RSSI = -127
+        private const val MAX_MONITORING_DURATION_MINUTES = 7 * 24 * 60
+        private const val AUTO_FLASH_LUMA_THRESHOLD = 70.0
+        private const val TORCH_EXPOSURE_SETTLE_MILLIS = 900L
+        private const val TORCH_MIN_FRAME_AGE_MILLIS = 500L
+        private const val TORCH_FRESH_FRAME_TIMEOUT_MILLIS = 1_500L
+        private const val TORCH_FRAME_POLL_MILLIS = 50L
+        private const val TORCH_REQUEST_ATTEMPTS = 15
+        private const val TORCH_REQUEST_RETRY_MILLIS = 100L
 
         @Volatile private var instance: MonitorController? = null
 

@@ -4,6 +4,8 @@ interface CameraFrameSource {
     val name: CameraSourceName
     fun latestFrame(): CapturedFrame?
     fun latestAverageLuma(): Double?
+    fun latestFrameTimestampMillis(): Long?
+    fun setTorchEnabled(enabled: Boolean): Boolean
 }
 
 enum class CameraSourceName {
