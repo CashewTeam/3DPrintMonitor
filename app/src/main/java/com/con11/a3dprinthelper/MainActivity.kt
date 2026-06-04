@@ -3,6 +3,7 @@ package com.con11.a3dprinthelper
 import android.Manifest
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.view.KeyEvent
 import androidx.activity.ComponentActivity
@@ -30,14 +31,19 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.lifecycleScope
+import com.con11.a3dprinthelper.monitor.MonitorController
 import com.con11.a3dprinthelper.ui.PrintMonitorApp
 import com.con11.a3dprinthelper.ui.VolumeWakeEvents
 import com.con11.a3dprinthelper.ui.theme._3DPrintHelperTheme
 import android.view.WindowManager
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        requestNotificationPermissionIfNeeded()
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         enableEdgeToEdge()
@@ -47,6 +53,20 @@ class MainActivity : ComponentActivity() {
                     PrintMonitorApp(viewModel = viewModel())
                 }
             }
+        }
+    }
+
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return
+        val launcher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (!granted) {
+                MonitorController.get(applicationContext).reportNotificationPermissionMissing()
+            }
+        }
+        lifecycleScope.launch {
+            delay(800)
+            launcher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
 

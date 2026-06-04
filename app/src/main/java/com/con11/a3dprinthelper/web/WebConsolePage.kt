@@ -31,20 +31,32 @@ object WebConsolePage {
     .side { padding:14px; display:flex; flex-direction:column; gap:10px; }
     button { border:0; border-radius:8px; padding:11px 12px; background:var(--accent); color:#082f49; font-weight:700; cursor:pointer; }
     button.secondary { background:transparent; color:var(--text); border:1px solid #60717e; }
+    button.fieldAction { margin-top:8px; padding:8px 10px; font-size:12px; }
     button.danger { background:var(--bad); color:white; }
-    .settings { grid-column:1/-1; padding:16px; display:grid; grid-template-columns:repeat(3,minmax(220px,1fr)); gap:14px; }
+    .settings { grid-column:1/-1; padding:16px; }
+    .settingsMasonry { display:grid; grid-template-columns:repeat(3,minmax(220px,1fr)); gap:14px; align-items:start; }
+    .settingsColumn { display:flex; flex-direction:column; gap:14px; min-width:0; }
+    .settingsSection { min-width:0; }
+    .settingsSection.compact { max-width:320px; }
     label { display:block; font-size:12px; color:var(--muted); margin-bottom:6px; }
     input, textarea, select { width:100%; border:1px solid #60717e; border-radius:8px; background:#101820; color:var(--text); padding:10px; }
+    input[type="checkbox"] { width:auto; padding:0; accent-color:var(--accent); }
+    input[type="range"] { padding:0; }
     textarea { min-height:150px; resize:vertical; }
     .field { margin-bottom:10px; }
+    .fieldHeader { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:6px; }
+    .fieldHeader label { margin:0; }
+    .rangeValue { min-width:62px; color:var(--text); font-size:12px; font-variant-numeric:tabular-nums; text-align:right; }
+    .field.booleanField { display:flex; align-items:center; min-height:40px; }
+    .field.booleanField label { margin:0; display:flex; align-items:center; gap:10px; font-size:15px; color:var(--text); }
     .notice { color:#ffcf9f; font-size:13px; }
-    @media (max-width: 860px) { .app { grid-template-columns:1fr; padding:10px; } .settings { grid-template-columns:1fr; } .overlay { position:static; width:100%; max-width:none; border-radius:0; } .videoPanel { display:block; } }
+    @media (max-width: 860px) { .app { grid-template-columns:1fr; padding:10px; } .settingsMasonry { grid-template-columns:1fr; } .overlay { position:static; width:100%; max-width:none; border-radius:0; } .videoPanel { display:block; } }
   </style>
 </head>
 <body>
   <main class="app">
     <section class="videoPanel">
-      <img id="stream" src="/stream.mjpg" alt="camera stream">
+      <img id="stream" alt="camera stream">
       <div id="overlay" class="overlay">
         <h1>3D 打印巡检</h1>
         <div class="row">
@@ -52,6 +64,7 @@ object WebConsolePage {
           <span class="metric" id="countdown">下次：--:--</span>
           <span class="metric" id="torch">补光 --</span>
           <span class="metric" id="cameraSource">相机 --</span>
+          <span class="metric" id="keepAliveState">保活 --</span>
         </div>
         <p id="summary">连接中...</p>
         <div class="row">
@@ -72,7 +85,9 @@ object WebConsolePage {
       <p class="notice">无密码局域网访问，请只在可信 Wi-Fi 使用。</p>
       <p id="webUrl"></p>
     </aside>
-    <section id="settings" class="settings"></section>
+    <section class="settings">
+      <div id="settings" class="settingsMasonry"></div>
+    </section>
     <section class="settings">
       <div>
         <h2>设置操作</h2>
@@ -84,9 +99,33 @@ object WebConsolePage {
   <script>
     let schema = null;
     let running = false;
+    let streamRetryTimer = null;
     const post = (url, data) => fetch(url, {method:"POST", headers:{"Content-Type":"application/json; charset=utf-8"}, body:JSON.stringify(data)});
     function fmtTime(ms){ return ms ? new Date(ms).toLocaleTimeString() : "--"; }
     function countdown(ms){ if(!ms) return "下次：--:--"; const d=Math.max(0,ms-Date.now()); return "下次：" + String(Math.floor(d/60000)).padStart(2,"0") + ":" + String(Math.floor((d%60000)/1000)).padStart(2,"0"); }
+    function connectStream(delayMs){
+      clearTimeout(streamRetryTimer);
+      streamRetryTimer=setTimeout(()=>{
+        const stream=document.getElementById("stream");
+        stream.src="/stream.mjpg?t="+Date.now();
+      }, delayMs||0);
+    }
+    async function waitForServer(url, timeoutMs){
+      const deadline=Date.now()+timeoutMs;
+      while(Date.now()<deadline){
+        try {
+          const response=await fetch(url+"api/status?t="+Date.now(),{cache:"no-store"});
+          if(response.ok) return true;
+        } catch(e) {}
+        await new Promise(resolve=>setTimeout(resolve,400));
+      }
+      return false;
+    }
+    function updateRangeValue(field){
+      const input=document.getElementById(field.key);
+      const value=document.getElementById(field.key+"Value");
+      if(input&&value) value.textContent=input.value+(field.unit ? " "+field.unit : "");
+    }
     function fieldElement(field) {
       let el;
       if(field.type==="enum"){
@@ -105,20 +144,67 @@ object WebConsolePage {
     }
     function renderSchema(){
       const root=document.getElementById("settings"); root.replaceChildren();
+      const columns = Array.from({length: window.innerWidth <= 860 ? 1 : 3}, () => {
+        const column = document.createElement("div");
+        column.className = "settingsColumn";
+        root.appendChild(column);
+        return { node: column, weight: 0 };
+      });
+      const fieldWeight = (field) => {
+        if(field.type==="textarea") return 6;
+        if(field.type==="slider") return 2;
+        if(field.type==="boolean") return 1;
+        return 2;
+      };
       schema.sections.forEach(section=>{
-        const group=document.createElement("div"); const title=document.createElement("h2"); title.textContent=section.title; group.appendChild(title);
+        const group=document.createElement("div"); group.className="settingsSection";
+        if(section.fields.length===1 && section.fields[0].type==="boolean") group.classList.add("compact");
+        const title=document.createElement("h2"); title.textContent=section.title; group.appendChild(title);
+        let groupWeight = 1;
         section.fields.forEach(field=>{
           const wrap=document.createElement("div"); wrap.className="field";
-          const label=document.createElement("label"); label.htmlFor=field.key; label.textContent=field.label+(field.unit ? "（"+field.unit+"）" : "")+(field.webWriteOnly ? "（留空表示不修改）" : "");
-          wrap.appendChild(label); wrap.appendChild(fieldElement(field)); group.appendChild(wrap);
+          const input=fieldElement(field);
+          if(field.type==="boolean"){
+            wrap.classList.add("booleanField");
+            const label=document.createElement("label");
+            label.htmlFor=field.key;
+            label.appendChild(input);
+            label.appendChild(document.createTextNode(field.label));
+            wrap.appendChild(label);
+          } else {
+            const label=document.createElement("label"); label.htmlFor=field.key; label.textContent=field.label+(field.unit ? "（"+field.unit+"）" : "")+(field.webWriteOnly ? "（留空表示不修改）" : "");
+            if(field.type==="slider"){
+              const header=document.createElement("div"); header.className="fieldHeader";
+              const value=document.createElement("span"); value.id=field.key+"Value"; value.className="rangeValue";
+              header.appendChild(label); header.appendChild(value);
+              input.addEventListener("input",()=>updateRangeValue(field));
+              wrap.appendChild(header); wrap.appendChild(input);
+            } else {
+              wrap.appendChild(label); wrap.appendChild(input);
+            }
+          }
+          if(field.resetAction){
+            const reset=document.createElement("button");
+            reset.type="button"; reset.className="secondary fieldAction";
+            reset.textContent=field.resetAction==="defaultPrompt" ? "恢复默认提示词" : "恢复默认值";
+            reset.onclick=async()=>{
+              const defaults=await (await fetch("/api/settings/defaults",{cache:"no-store"})).json();
+              if(defaults[field.key]!==undefined) input.value=defaults[field.key];
+            };
+            wrap.appendChild(reset);
+          }
+          group.appendChild(wrap);
+          groupWeight += fieldWeight(field);
         });
-        root.appendChild(group);
+        const target = columns.reduce((best, current) => current.weight < best.weight ? current : best, columns[0]);
+        target.node.appendChild(group);
+        target.weight += groupWeight;
       });
     }
     async function loadSettings(){
       if(!schema){ schema=await (await fetch("/api/settings/schema",{cache:"no-store"})).json(); renderSchema(); }
       const s=await (await fetch("/api/settings",{cache:"no-store"})).json();
-      schema.sections.flatMap(x=>x.fields).forEach(field=>{ const el=document.getElementById(field.key); if(!el || s[field.key]===undefined || field.webWriteOnly) return; if(el.type==="checkbox") el.checked=!!s[field.key]; else el.value=s[field.key]; });
+      schema.sections.flatMap(x=>x.fields).forEach(field=>{ const el=document.getElementById(field.key); if(!el || s[field.key]===undefined || field.webWriteOnly) return; if(el.type==="checkbox") el.checked=!!s[field.key]; else el.value=s[field.key]; if(field.type==="slider") updateRangeValue(field); });
     }
     async function refresh(){
       try {
@@ -132,6 +218,7 @@ object WebConsolePage {
         document.getElementById("countdown").textContent = countdown(s.nextCaptureAtMillis);
         document.getElementById("torch").textContent = "补光 " + (s.torchEnabled ? "开" : "关");
         document.getElementById("cameraSource").textContent = "相机 " + (s.cameraSource || "--");
+        document.getElementById("keepAliveState").textContent = s.keepAliveTemporarilyStopped ? "保活 已临时停止" : s.keepAliveServiceRunning ? "保活 运行中" : "保活 已停止";
         document.getElementById("summary").textContent = r ? r.summary : s.statusMessage;
         document.getElementById("lastTime").textContent = "最近 " + fmtTime(s.lastAnalysisAtMillis);
         document.getElementById("model").textContent = "模型 " + s.settings.openAiModel;
@@ -157,11 +244,22 @@ object WebConsolePage {
       schema.sections.flatMap(x=>x.fields).forEach(field=>{ const el=document.getElementById(field.key); if(!el || (field.webWriteOnly && !el.value.trim())) return; data[field.key]=(field.type==="number"||field.type==="slider") ? Number(el.value) : field.type==="boolean" ? el.checked : el.value; });
       try {
         const response=await post("/api/settings",data); if(!response.ok) throw new Error(await response.text());
-        const result=await response.json(); state.textContent="保存成功，正在刷新...";
-        setTimeout(()=>{ window.location.href=result.reloadUrl || window.location.href; }, result.reloadAfterMs || 1500);
+        const result=await response.json(), target=result.reloadUrl || window.location.href;
+        state.textContent="保存成功，正在等待服务刷新...";
+        await new Promise(resolve=>setTimeout(resolve,result.reloadAfterMs||700));
+        const ready=await waitForServer(target,10000);
+        if(ready) window.location.replace(target+"?t="+Date.now());
+        else { button.disabled=false; state.textContent="设置已保存，Web 服务仍在启动"; connectStream(0); }
       } catch(e) { button.disabled=false; state.textContent="保存失败："+e.message; }
     };
-    loadSettings(); refresh(); setInterval(refresh, 1000);
+    window.addEventListener("resize", () => {
+      const nextColumnCount = window.innerWidth <= 860 ? 1 : 3;
+      if(document.querySelectorAll(".settingsColumn").length !== nextColumnCount) loadSettings();
+    });
+    const stream=document.getElementById("stream");
+    stream.addEventListener("error",()=>connectStream(1000));
+    stream.addEventListener("load",()=>clearTimeout(streamRetryTimer));
+    connectStream(0); loadSettings(); refresh(); setInterval(refresh, 1000);
   </script>
 </body>
 </html>

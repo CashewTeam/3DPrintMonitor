@@ -51,7 +51,6 @@
         {"key":"webPort","label":"Web 端口号","type":"number","default":8080,"min":1024,"max":65535},
         {"key":"keepAliveServiceEnabled","label":"后台保活服务","type":"boolean","default":true},
         {"key":"autoScreenOffEnabled","label":"自动息屏","type":"boolean","default":true},
-        {"key":"webAliveInBackground","label":"锁屏/后台保持 Web 可访问","type":"boolean","default":true},
         {"key":"webPreviewScalePercent","label":"Web 预览分辨率","type":"slider","default":70,"min":20,"max":100,"unit":"%"},
         {"key":"webPreviewFps","label":"Web 预览帧率","type":"slider","default":3,"min":1,"max":10,"unit":"FPS"}
       ]

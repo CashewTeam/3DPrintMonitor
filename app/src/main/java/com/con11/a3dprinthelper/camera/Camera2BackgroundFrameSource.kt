@@ -21,6 +21,7 @@ import android.util.Size
 import androidx.core.app.ActivityCompat
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
 
@@ -35,6 +36,7 @@ class Camera2BackgroundFrameSource(
     private val appContext = context.applicationContext
     private val cameraManager = appContext.getSystemService(Context.CAMERA_SERVICE) as CameraManager
     private val latestFrame = AtomicReference<RawFrame?>(null)
+    private val lastFrameTimestamp = AtomicLong(0L)
     private val lock = Any()
 
     private var backgroundThread: HandlerThread? = null
@@ -45,20 +47,29 @@ class Camera2BackgroundFrameSource(
     private var captureRequestBuilder: CaptureRequest.Builder? = null
     private var running = false
     private var lastTorchEnabled = false
+    private var consecutiveFrameErrors = 0
 
     override fun latestFrame(): CapturedFrame? {
         val frame = latestFrame.get() ?: return null
         val jpegBytes = frame.toJpeg(jpegQualityProvider().coerceIn(40, 100))
-        return CapturedFrame(jpegBytes = jpegBytes, averageLuma = frame.averageLuma)
+        return CapturedFrame(
+            jpegBytes = jpegBytes,
+            averageLuma = frame.averageLuma,
+            timestampMillis = frame.timestampMillis
+        )
     }
 
     override fun latestAverageLuma(): Double? = latestFrame.get()?.averageLuma
+
+    fun lastFrameAtMillis(): Long = lastFrameTimestamp.get()
 
     fun start() {
         synchronized(lock) {
             if (running) return
             stopThreadLocked()
             running = true
+            consecutiveFrameErrors = 0
+            lastFrameTimestamp.set(0L)
             startThreadLocked()
         }
         openCamera()
@@ -156,14 +167,24 @@ class Camera2BackgroundFrameSource(
                 val reader = ImageReader.newInstance(size.width, size.height, ImageFormat.YUV_420_888, 2)
                 reader.setOnImageAvailableListener({ imageReader ->
                     val image = imageReader.acquireLatestImage() ?: return@setOnImageAvailableListener
+                    var frameError: Throwable? = null
                     try {
                         latestFrame.set(image.toRawFrame())
+                        lastFrameTimestamp.set(System.currentTimeMillis())
+                        consecutiveFrameErrors = 0
                         updateTorchIfNeeded()
-                    } catch (_: Throwable) {
-                        // Older camera HALs sometimes provide short or oddly-strided buffers.
-                        // Dropping one bad frame is safer than killing the service thread.
+                    } catch (error: Throwable) {
+                        consecutiveFrameErrors += 1
+                        if (consecutiveFrameErrors >= MAX_CONSECUTIVE_FRAME_ERRORS) {
+                            frameError = error
+                        }
                     } finally {
                         image.close()
+                    }
+                    if (frameError != null) {
+                        handler.post {
+                            fail("后台相机连续取帧转换失败：${frameError?.readableMessage() ?: "未知错误"}")
+                        }
                     }
                 }, handler)
 
@@ -171,10 +192,11 @@ class Camera2BackgroundFrameSource(
                     imageReader?.close()
                     imageReader = reader
                     lastTorchEnabled = torchEnabledProvider()
-                    captureRequestBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                    captureRequestBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
                         addTarget(reader.surface)
+                        set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
                         set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
-                        set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+                        set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
                         set(CaptureRequest.FLASH_MODE, if (lastTorchEnabled) CaptureRequest.FLASH_MODE_TORCH else CaptureRequest.FLASH_MODE_OFF)
                     }
                 }
@@ -267,7 +289,8 @@ class Camera2BackgroundFrameSource(
             nv21Bytes = nv21,
             width = width,
             height = height,
-            averageLuma = averageLuma()
+            averageLuma = averageLuma(),
+            timestampMillis = System.currentTimeMillis()
         )
     }
 
@@ -392,6 +415,11 @@ class Camera2BackgroundFrameSource(
         val nv21Bytes: ByteArray,
         val width: Int,
         val height: Int,
-        val averageLuma: Double
+        val averageLuma: Double,
+        val timestampMillis: Long
     )
+
+    private companion object {
+        const val MAX_CONSECUTIVE_FRAME_ERRORS = 10
+    }
 }

@@ -57,6 +57,7 @@ class MonitorController private constructor(private val appContext: Context) {
     private var webServer: MonitorWebServer? = null
     private var webServerPort: Int? = null
     private var foregroundVisible = false
+    @Volatile private var keepAliveTemporarilyStopped = false
     private var webServerStarting = false
     private var webServerRetryJob: Job? = null
 
@@ -130,7 +131,7 @@ class MonitorController private constructor(private val appContext: Context) {
             repository.save(next)
             mutableUiState.update { it.copy(statusMessage = "设置已保存", errorMessage = null) }
             delay(150)
-            syncWebServer(forceRestart = true)
+            syncWebServer()
         }
     }
 
@@ -142,6 +143,8 @@ class MonitorController private constructor(private val appContext: Context) {
 
     fun settingsJson(maskSecrets: Boolean): org.json.JSONObject =
         settingsCodec.toJson(currentSettings(), maskSecrets)
+
+    fun defaultSettingsJson(): org.json.JSONObject = settingsCodec.defaultsJson()
 
     fun updateSettingsFromJson(values: org.json.JSONObject): AppSettings =
         settingsCodec.update(currentSettings(), values, preserveBlankSecrets = true)
@@ -155,6 +158,35 @@ class MonitorController private constructor(private val appContext: Context) {
     fun currentUiState(): MonitorUiState = mutableUiState.value
 
     fun isForegroundVisible(): Boolean = foregroundVisible
+
+    fun isKeepAliveTemporarilyStopped(): Boolean = keepAliveTemporarilyStopped
+
+    fun reportKeepAliveServiceRunning(running: Boolean) {
+        mutableUiState.update {
+            it.copy(
+                keepAliveServiceRunning = running,
+                keepAliveTemporarilyStopped = keepAliveTemporarilyStopped
+            )
+        }
+    }
+
+    fun temporarilyStopKeepAliveService() {
+        keepAliveTemporarilyStopped = true
+        mutableUiState.update {
+            it.copy(
+                keepAliveServiceRunning = false,
+                keepAliveTemporarilyStopped = true,
+                statusMessage = "后台保活服务已临时停止"
+            )
+        }
+        syncWebServer()
+    }
+
+    fun reportNotificationPermissionMissing() {
+        mutableUiState.update {
+            it.copy(errorMessage = "通知权限未授权，后台保活通知可能不可见")
+        }
+    }
 
     fun startMonitoring() {
         if (loopJob?.isActive == true) return
@@ -225,10 +257,10 @@ class MonitorController private constructor(private val appContext: Context) {
 
     fun checkShizukuPermissionOnStartup() {
         scope.launch {
-            val result = shizukuScreenPowerController.ensurePermission()
+            val result = shizukuScreenPowerController.prepare()
             mutableUiState.update {
                 if (result.success) {
-                    it.copy(statusMessage = "Shizuku 已授权，息屏控制可用", errorMessage = null)
+                    it.copy(statusMessage = "Shizuku 已授权，息屏控制服务已就绪", errorMessage = null)
                 } else {
                     it.copy(statusMessage = result.message ?: "Shizuku 未授权，息屏将使用黑屏兜底")
                 }
@@ -295,7 +327,7 @@ class MonitorController private constructor(private val appContext: Context) {
     fun webUrl(): String = NetworkAddress.localHttpUrl(settings.value.webPort.coerceIn(1024, 65535))
 
     fun syncService() {
-        val shouldRunService = settings.value.keepAliveServiceEnabled
+        val shouldRunService = settings.value.keepAliveServiceEnabled && !keepAliveTemporarilyStopped
         val intent = Intent(appContext, MonitoringService::class.java)
         if (shouldRunService) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -315,7 +347,7 @@ class MonitorController private constructor(private val appContext: Context) {
     private fun syncWebServerInternal(forceRestart: Boolean = false, attempt: Int) {
         if (webServerStarting) return
         val port = settings.value.webPort.coerceIn(1024, 65535)
-        val shouldRun = foregroundVisible || (mutableUiState.value.isRunning && settings.value.webAliveInBackground)
+        val shouldRun = foregroundVisible || (settings.value.keepAliveServiceEnabled && !keepAliveTemporarilyStopped)
         if (!shouldRun) {
             stopWebServer()
             return
@@ -339,6 +371,7 @@ class MonitorController private constructor(private val appContext: Context) {
             getSettings = ::currentSettings,
             getSettingsSchemaJson = ::settingsSchemaJson,
             encodeSettings = ::settingsJson,
+            getDefaultSettings = ::defaultSettingsJson,
             decodeSettings = ::updateSettingsFromJson,
             getUiState = ::currentUiState,
             getFrame = { latestWebFrame() },

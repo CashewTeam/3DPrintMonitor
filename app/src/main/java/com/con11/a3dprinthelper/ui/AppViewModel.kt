@@ -25,7 +25,9 @@ data class MonitorUiState(
     val webUrl: String = "",
     val cameraSource: String = "none",
     val lastFrameAtMillis: Long? = null,
-    val cameraError: String? = null
+    val cameraError: String? = null,
+    val keepAliveServiceRunning: Boolean = false,
+    val keepAliveTemporarilyStopped: Boolean = false
 )
 
 class AppViewModel(application: Application) : AndroidViewModel(application) {

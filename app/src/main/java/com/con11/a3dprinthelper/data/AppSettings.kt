@@ -22,7 +22,6 @@ data class AppSettings(
     val webPort: Int = 8080,
     val keepAliveServiceEnabled: Boolean = true,
     val autoScreenOffEnabled: Boolean = true,
-    val webAliveInBackground: Boolean = true,
     val webPreviewScalePercent: Int = 70,
     val webPreviewFps: Int = 3
 )

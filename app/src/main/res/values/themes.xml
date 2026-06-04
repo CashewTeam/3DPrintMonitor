@@ -2,4 +2,6 @@
 <resources>
 
     <style name="Theme._3DPrintHelper" parent="android:Theme.Material.Light.NoActionBar" />
+
+    <style name="Theme._3DPrintHelper.Exit" parent="android:style/Theme.NoDisplay" />
 </resources>

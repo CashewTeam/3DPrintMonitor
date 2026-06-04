@@ -9,6 +9,7 @@ class WebControlBridge(
     private val getSettings: () -> AppSettings,
     private val getSettingsSchemaJson: () -> String,
     private val encodeSettings: (Boolean) -> JSONObject,
+    private val getDefaultSettings: () -> JSONObject,
     private val decodeSettings: (JSONObject) -> AppSettings,
     private val getUiState: () -> MonitorUiState,
     private val getFrame: () -> CapturedFrame?,
@@ -26,6 +27,8 @@ class WebControlBridge(
     fun settingsSchemaJson(): String = getSettingsSchemaJson()
 
     fun settingsJson(maskSecrets: Boolean): JSONObject = encodeSettings(maskSecrets)
+
+    fun defaultSettingsJson(): JSONObject = getDefaultSettings()
 
     fun decodeSettings(values: JSONObject): AppSettings = decodeSettings.invoke(values)
 

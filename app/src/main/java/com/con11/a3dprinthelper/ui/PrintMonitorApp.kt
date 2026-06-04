@@ -357,6 +357,14 @@ private fun CameraStatusOverlay(
             OverlayMetric("最近", uiState.lastAnalysisAtMillis?.formatTime() ?: "尚未分析")
             OverlayMetric("模型", settings.openAiModel)
             OverlayMetric("补光", if (uiState.torchEnabled) "开" else "关")
+            OverlayMetric(
+                "保活",
+                when {
+                    uiState.keepAliveTemporarilyStopped -> "临时停止"
+                    uiState.keepAliveServiceRunning -> "运行中"
+                    else -> "已停止"
+                }
+            )
         }
         Text(
             text = "Web $webUrl",

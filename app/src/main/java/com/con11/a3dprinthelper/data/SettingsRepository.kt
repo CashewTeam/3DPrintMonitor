@@ -49,7 +49,6 @@ class SettingsRepository(
             webPort = prefs[Keys.webPort] ?: defaults.webPort,
             keepAliveServiceEnabled = prefs[Keys.keepAliveServiceEnabled] ?: defaults.keepAliveServiceEnabled,
             autoScreenOffEnabled = prefs[Keys.autoScreenOffEnabled] ?: defaults.autoScreenOffEnabled,
-            webAliveInBackground = prefs[Keys.webAliveInBackground] ?: defaults.webAliveInBackground,
             webPreviewScalePercent = prefs[Keys.webPreviewScalePercent] ?: defaults.webPreviewScalePercent,
             webPreviewFps = prefs[Keys.webPreviewFps] ?: defaults.webPreviewFps
         ))
@@ -76,7 +75,6 @@ class SettingsRepository(
             prefs[Keys.webPort] = normalized.webPort
             prefs[Keys.keepAliveServiceEnabled] = normalized.keepAliveServiceEnabled
             prefs[Keys.autoScreenOffEnabled] = normalized.autoScreenOffEnabled
-            prefs[Keys.webAliveInBackground] = normalized.webAliveInBackground
             prefs[Keys.webPreviewScalePercent] = normalized.webPreviewScalePercent
             prefs[Keys.webPreviewFps] = normalized.webPreviewFps
             prefs[Keys.secureRevision] = (prefs[Keys.secureRevision] ?: 0) + 1
@@ -109,7 +107,6 @@ class SettingsRepository(
         val webPort = intPreferencesKey("web_port")
         val keepAliveServiceEnabled = booleanPreferencesKey("keep_alive_service_enabled")
         val autoScreenOffEnabled = booleanPreferencesKey("auto_screen_off_enabled")
-        val webAliveInBackground = booleanPreferencesKey("web_alive_in_background")
         val webPreviewScalePercent = intPreferencesKey("web_preview_scale_percent")
         val webPreviewFps = intPreferencesKey("web_preview_fps")
         val secureRevision = intPreferencesKey("secure_revision")

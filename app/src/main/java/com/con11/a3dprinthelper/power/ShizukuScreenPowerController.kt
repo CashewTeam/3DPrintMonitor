@@ -6,7 +6,10 @@ import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.os.IBinder
 import android.os.Parcel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import rikka.shizuku.Shizuku
@@ -15,6 +18,7 @@ import kotlin.coroutines.resume
 class ShizukuScreenPowerController(private val context: Context) {
     private val appContext = context.applicationContext
     private val lock = Any()
+    private val powerModeLock = Mutex()
     private var serviceBinder: IBinder? = null
     private var binding = false
 
@@ -50,6 +54,16 @@ class ShizukuScreenPowerController(private val context: Context) {
     suspend fun turnScreenOn(): ShizukuScreenPowerResult =
         setDisplayPowerMode(ShizukuDisplayPowerService.POWER_MODE_NORMAL)
 
+    suspend fun prepare(): ShizukuScreenPowerResult = withContext(Dispatchers.IO) {
+        val permission = ensurePermission()
+        if (!permission.success) return@withContext permission
+        if (bindService() != null) {
+            ShizukuScreenPowerResult(true, null)
+        } else {
+            ShizukuScreenPowerResult(false, "Shizuku 显示控制服务绑定失败")
+        }
+    }
+
     suspend fun ensurePermission(): ShizukuScreenPowerResult = withContext(Dispatchers.IO) {
         runCatching {
             if (!Shizuku.pingBinder()) return@withContext ShizukuScreenPowerResult(false, "Shizuku 未运行")
@@ -65,38 +79,60 @@ class ShizukuScreenPowerController(private val context: Context) {
         }
     }
 
-    private suspend fun setDisplayPowerMode(mode: Int): ShizukuScreenPowerResult = withContext(Dispatchers.IO) {
-        val permission = ensurePermission()
-        if (!permission.success) return@withContext permission
-        val binder = bindService() ?: return@withContext ShizukuScreenPowerResult(false, "Shizuku 显示控制服务绑定失败")
+    private suspend fun setDisplayPowerMode(mode: Int): ShizukuScreenPowerResult =
+        powerModeLock.withLock {
+            withContext(Dispatchers.IO) {
+                val permission = ensurePermission()
+                if (!permission.success) return@withContext permission
 
-        runCatching {
-            val data = Parcel.obtain()
-            val reply = Parcel.obtain()
-            try {
-                data.writeInterfaceToken(ShizukuDisplayPowerService.DESCRIPTOR)
-                data.writeInt(mode)
-                binder.transact(ShizukuDisplayPowerService.TRANSACTION_SET_DISPLAY_POWER_MODE, data, reply, 0)
-                reply.readException()
-                val error = reply.readString()
-                if (error == null) {
-                    ShizukuScreenPowerResult(true, null)
-                } else {
-                    ShizukuScreenPowerResult(false, error)
+                var lastFailure = ShizukuScreenPowerResult(false, "Shizuku 显示控制调用失败")
+                repeat(if (mode == ShizukuDisplayPowerService.POWER_MODE_OFF) OFF_ATTEMPTS else ON_ATTEMPTS) { attempt ->
+                    val binder = bindService()
+                    if (binder == null) {
+                        lastFailure = ShizukuScreenPowerResult(false, "Shizuku 显示控制服务绑定失败")
+                    } else {
+                        val result = transactPowerMode(binder, mode)
+                        if (result.success) {
+                            if (attempt + 1 < OFF_ATTEMPTS && mode == ShizukuDisplayPowerService.POWER_MODE_OFF) {
+                                delay(OFF_RETRY_DELAY_MS)
+                            } else {
+                                return@withContext result
+                            }
+                        } else {
+                            lastFailure = result
+                            synchronized(lock) { serviceBinder = null }
+                            delay(REBIND_RETRY_DELAY_MS)
+                        }
+                    }
                 }
-            } finally {
-                data.recycle()
-                reply.recycle()
+                lastFailure
             }
-        }.getOrElse {
-            synchronized(lock) { serviceBinder = null }
-            ShizukuScreenPowerResult(false, it.message ?: "Shizuku 显示控制调用失败")
         }
+
+    private fun transactPowerMode(binder: IBinder, mode: Int): ShizukuScreenPowerResult = runCatching {
+        val data = Parcel.obtain()
+        val reply = Parcel.obtain()
+        try {
+            data.writeInterfaceToken(ShizukuDisplayPowerService.DESCRIPTOR)
+            data.writeInt(mode)
+            if (!binder.transact(ShizukuDisplayPowerService.TRANSACTION_SET_DISPLAY_POWER_MODE, data, reply, 0)) {
+                return@runCatching ShizukuScreenPowerResult(false, "Shizuku 显示控制服务未接受命令")
+            }
+            reply.readException()
+            val error = reply.readString()
+            if (error == null) ShizukuScreenPowerResult(true, null) else ShizukuScreenPowerResult(false, error)
+        } finally {
+            data.recycle()
+            reply.recycle()
+        }
+    }.getOrElse {
+        ShizukuScreenPowerResult(false, it.message ?: "Shizuku 显示控制调用失败")
     }
 
     private suspend fun bindService(): IBinder? {
         synchronized(lock) {
-            serviceBinder?.let { return it }
+            serviceBinder?.takeIf { it.isBinderAlive && it.pingBinder() }?.let { return it }
+            serviceBinder = null
             if (!binding) {
                 binding = true
                 Shizuku.bindUserService(userServiceArgs, serviceConnection)
@@ -106,8 +142,9 @@ class ShizukuScreenPowerController(private val context: Context) {
         return suspendCancellableCoroutine { continuation ->
             val start = System.currentTimeMillis()
             fun poll() {
+                if (!continuation.isActive) return
                 val binder = synchronized(lock) { serviceBinder }
-                if (binder != null) {
+                if (binder != null && binder.isBinderAlive && binder.pingBinder()) {
                     continuation.resume(binder)
                     return
                 }
@@ -125,6 +162,10 @@ class ShizukuScreenPowerController(private val context: Context) {
     companion object {
         private const val USER_SERVICE_VERSION = 1
         private const val BIND_TIMEOUT_MS = 3_000L
+        private const val OFF_ATTEMPTS = 3
+        private const val ON_ATTEMPTS = 2
+        private const val OFF_RETRY_DELAY_MS = 180L
+        private const val REBIND_RETRY_DELAY_MS = 120L
         private const val SHIZUKU_PERMISSION_REQUEST_CODE = 6401
     }
 }

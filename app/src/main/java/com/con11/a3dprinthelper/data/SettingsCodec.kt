@@ -45,6 +45,8 @@ class SettingsCodec(val schema: SettingsSchema) {
         return json
     }
 
+    fun defaultsJson(): JSONObject = toJson(defaultSettings(), maskSecrets = true)
+
     fun getValue(settings: AppSettings, key: String): Any = when (key) {
         "captureIntervalMinutes" -> settings.captureIntervalMinutes
         "jpegQuality" -> settings.jpegQuality
@@ -61,7 +63,6 @@ class SettingsCodec(val schema: SettingsSchema) {
         "webPort" -> settings.webPort
         "keepAliveServiceEnabled" -> settings.keepAliveServiceEnabled
         "autoScreenOffEnabled" -> settings.autoScreenOffEnabled
-        "webAliveInBackground" -> settings.webAliveInBackground
         "webPreviewScalePercent" -> settings.webPreviewScalePercent
         "webPreviewFps" -> settings.webPreviewFps
         else -> error("未知设置字段：$key")
@@ -94,7 +95,6 @@ class SettingsCodec(val schema: SettingsSchema) {
             "webPort" -> current.copy(webPort = rangedInt ?: current.webPort)
             "keepAliveServiceEnabled" -> current.copy(keepAliveServiceEnabled = boolValue)
             "autoScreenOffEnabled" -> current.copy(autoScreenOffEnabled = boolValue)
-            "webAliveInBackground" -> current.copy(webAliveInBackground = boolValue)
             "webPreviewScalePercent" -> current.copy(webPreviewScalePercent = rangedInt ?: current.webPreviewScalePercent)
             "webPreviewFps" -> current.copy(webPreviewFps = rangedInt ?: current.webPreviewFps)
             else -> current

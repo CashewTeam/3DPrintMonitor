@@ -23,7 +23,7 @@ class SettingsCodecTest {
                 "captureIntervalMinutes", "jpegQuality", "requestTimeoutSeconds",
                 "notificationCooldownMinutes", "autoFlashEnabled", "openAiApiKey", "openAiModel",
                 "openAiBaseUrl", "imageDetail", "prompt", "barkUrl", "barkTitleTemplate",
-                "webPort", "keepAliveServiceEnabled", "autoScreenOffEnabled", "webAliveInBackground",
+                "webPort", "keepAliveServiceEnabled", "autoScreenOffEnabled",
                 "webPreviewScalePercent", "webPreviewFps"
             ),
             keys
